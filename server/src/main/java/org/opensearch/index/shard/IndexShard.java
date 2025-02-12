@@ -513,6 +513,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         return shardMigrationState == REMOTE_MIGRATING_UNSEEDED;
     }
 
+    public boolean isIngestionSource() {
+        return indexSettings().getIndexMetadata().useIngestionSource();
+    }
+
     /**
      * To be delegated to {@link ReplicationTracker} so that relevant remote store based
      * operations can be ignored during engine migration
@@ -2486,6 +2490,12 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         // we have to set it before we open an engine and recover from the translog because
         // acquiring a snapshot from the translog causes a sync which causes the global checkpoint to be pulled in,
         // and an engine can be forced to close in ctor which also causes the global checkpoint to be pulled in.
+
+        // todo: check
+        if(isIngestionSource()) {
+            return;
+        }
+
         final String translogUUID = store.readLastCommittedSegmentsInfo().getUserData().get(TRANSLOG_UUID_KEY);
         final long globalCheckpoint = Translog.readGlobalCheckpoint(translogConfig.getTranslogPath(), translogUUID);
         replicationTracker.updateGlobalCheckpointOnReplica(globalCheckpoint, "read from translog checkpoint");

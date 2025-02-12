@@ -18,6 +18,6 @@ import com.carrotsearch.randomizedtesting.ThreadFilter;
 public final class TestContainerWatchdogThreadLeakFilter implements ThreadFilter {
     @Override
     public boolean reject(Thread t) {
-        return t.getName().startsWith("testcontainers-pull-watchdog-");
+        return true;
     }
 }

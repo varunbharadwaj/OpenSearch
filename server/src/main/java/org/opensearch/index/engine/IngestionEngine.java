@@ -9,13 +9,7 @@
 package org.opensearch.index.engine;
 
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
-import org.apache.lucene.index.DirectoryReader;
-import org.apache.lucene.index.IndexCommit;
-import org.apache.lucene.index.IndexWriter;
-import org.apache.lucene.index.IndexWriterConfig;
-import org.apache.lucene.index.MergePolicy;
-import org.apache.lucene.index.SegmentCommitInfo;
-import org.apache.lucene.index.SegmentInfos;
+import org.apache.lucene.index.*;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.ReferenceManager;
 import org.apache.lucene.store.AlreadyClosedException;
@@ -192,6 +186,9 @@ public class IngestionEngine extends Engine {
         }
 
         streamPoller = new DefaultStreamPoller(startPointer, persistedPointers, ingestionShardConsumer, this, resetState);
+//        if (!engineConfig.isReadOnlyReplica()) {
+//            streamPoller.start();
+//        }
         streamPoller.start();
     }
 
@@ -391,7 +388,28 @@ public class IngestionEngine extends Engine {
 
     @Override
     protected SegmentInfos getLatestSegmentInfos() {
-        throw new UnsupportedOperationException();
+        try (final GatedCloseable<SegmentInfos> snapshot = getSegmentInfosSnapshot()) {
+            return snapshot.get();
+        } catch (IOException e) {
+            throw new EngineException(shardId, e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public GatedCloseable<SegmentInfos> getSegmentInfosSnapshot() {
+        final OpenSearchDirectoryReader reader;
+        try {
+            reader = internalReaderManager.acquire();
+            return new GatedCloseable<>(((StandardDirectoryReader) reader.getDelegate()).getSegmentInfos(), () -> {
+                try {
+                    internalReaderManager.release(reader);
+                } catch (AlreadyClosedException e) {
+                    logger.warn("Engine is already closed.", e);
+                }
+            });
+        } catch (IOException e) {
+            throw new EngineException(shardId, e.getMessage(), e);
+        }
     }
 
     @Override
@@ -461,12 +479,20 @@ public class IngestionEngine extends Engine {
 
     @Override
     protected ReferenceManager<OpenSearchDirectoryReader> getReferenceManager(SearcherScope scope) {
-        return externalReaderManager;
+        switch (scope) {
+            case INTERNAL:
+                return internalReaderManager;
+            case EXTERNAL:
+                return externalReaderManager;
+            default:
+                throw new IllegalStateException("unknown scope: " + scope);
+        }
     }
 
     @Override
     public Closeable acquireHistoryRetentionLock() {
-        throw new UnsupportedOperationException("Not implemented");
+        // do not need to retain operations as they can be replayed from ingestion source
+        return () -> {};
     }
 
     @Override
@@ -477,7 +503,22 @@ public class IngestionEngine extends Engine {
         boolean requiredFullRange,
         boolean accurateCount
     ) throws IOException {
-        throw new UnsupportedOperationException("Not implemented");
+       return new Translog.Snapshot() {
+           @Override
+           public int totalOperations() {
+               return 0;
+           }
+
+           @Override
+           public Translog.Operation next() throws IOException {
+               return null;
+           }
+
+           @Override
+           public void close() throws IOException {
+
+           }
+       };
     }
 
     @Override
@@ -507,7 +548,7 @@ public class IngestionEngine extends Engine {
 
     @Override
     public SeqNoStats getSeqNoStats(long globalCheckpoint) {
-        return null;
+        return new SeqNoStats(0, 0, 0);
     }
 
     @Override
