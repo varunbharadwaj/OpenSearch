@@ -9,10 +9,7 @@
 package org.opensearch.indices.pollingingest;
 
 import org.opensearch.index.IngestionConsumerFactory;
-import org.opensearch.index.engine.Engine;
-import org.opensearch.index.engine.EngineConfig;
-import org.opensearch.index.engine.EngineFactory;
-import org.opensearch.index.engine.IngestionEngine;
+import org.opensearch.index.engine.*;
 
 import java.util.Objects;
 
@@ -29,6 +26,10 @@ public class IngestionEngineFactory implements EngineFactory {
 
     @Override
     public Engine newReadWriteEngine(EngineConfig config) {
+        if (config.isReadOnlyReplica()) {
+            return new IngestionReplicationEngine(config);
+        }
+
         IngestionEngine ingestionEngine = new IngestionEngine(config, ingestionConsumerFactory);
         ingestionEngine.start();
 

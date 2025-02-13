@@ -44,11 +44,7 @@ import org.opensearch.index.merge.OnGoingMerge;
 import org.opensearch.index.seqno.SeqNoStats;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.OpenSearchMergePolicy;
-import org.opensearch.index.translog.NoOpTranslogManager;
-import org.opensearch.index.translog.Translog;
-import org.opensearch.index.translog.TranslogCorruptedException;
-import org.opensearch.index.translog.TranslogManager;
-import org.opensearch.index.translog.TranslogStats;
+import org.opensearch.index.translog.*;
 import org.opensearch.indices.pollingingest.DefaultStreamPoller;
 import org.opensearch.indices.pollingingest.StreamPoller;
 import org.opensearch.search.suggest.completion.CompletionStats;
@@ -71,7 +67,7 @@ import static org.opensearch.index.translog.Translog.EMPTY_TRANSLOG_SNAPSHOT;
 /**
  * IngestionEngine is an engine that ingests data from a stream source.
  */
-public class IngestionEngine extends Engine {
+public class IngestionEngine2 extends Engine {
 
     private volatile SegmentInfos lastCommittedSegmentInfos;
     private final CompletionStatsCache completionStatsCache;
@@ -93,7 +89,7 @@ public class IngestionEngine extends Engine {
     @Nullable
     private volatile String forceMergeUUID;
 
-    public IngestionEngine(EngineConfig engineConfig, IngestionConsumerFactory ingestionConsumerFactory) {
+    public IngestionEngine2(EngineConfig engineConfig, IngestionConsumerFactory ingestionConsumerFactory) {
         super(engineConfig);
         store.incRef();
         boolean success = false;
@@ -106,14 +102,6 @@ public class IngestionEngine extends Engine {
             indexWriter = createWriter();
             externalReaderManager = createReaderManager(new InternalEngine.RefreshWarmerListener(logger, isClosed, engineConfig));
             internalReaderManager = externalReaderManager.internalReaderManager;
-
-            for (ReferenceManager.RefreshListener listener : engineConfig.getExternalRefreshListener()) {
-                this.externalReaderManager.addListener(listener);
-            }
-            for (ReferenceManager.RefreshListener listener : engineConfig.getInternalRefreshListener()) {
-                this.internalReaderManager.addListener(listener);
-            }
-
             translogManager = new NoOpTranslogManager(
                 shardId,
                 readLock,
@@ -186,7 +174,7 @@ public class IngestionEngine extends Engine {
             resetState = StreamPoller.ResetState.NONE;
         }
 
-        streamPoller = new DefaultStreamPoller(startPointer, persistedPointers, ingestionShardConsumer, this, resetState);
+        //streamPoller = new DefaultStreamPoller(startPointer, persistedPointers, ingestionShardConsumer, this, resetState);
         if (!engineConfig.isReadOnlyReplica()) {
             streamPoller.start();
         }
@@ -626,11 +614,6 @@ public class IngestionEngine extends Engine {
 
     @Override
     public boolean shouldPeriodicallyFlush() {
-        ensureOpen();
-        if (shouldPeriodicallyFlushAfterBigMerge.get()) {
-            return true;
-        }
-
         return false;
     }
 
@@ -663,8 +646,7 @@ public class IngestionEngine extends Engine {
                 // (3) the newly created commit points to a different translog generation (can free translog),
                 // or (4) the local checkpoint information in the last commit is stale, which slows down future recoveries.
                 boolean hasUncommittedChanges = indexWriter.hasUncommittedChanges();
-                boolean shouldPeriodicallyFlush = shouldPeriodicallyFlush();
-                if (hasUncommittedChanges || force || shouldPeriodicallyFlush) {
+                if (hasUncommittedChanges || force) {
                     logger.trace("starting commit for flush;");
 
                     // TODO: do we need to close the latest commit as done in InternalEngine?
@@ -678,8 +660,6 @@ public class IngestionEngine extends Engine {
                     // we need to refresh in order to clear older version values
                     refresh("version_table_flush", SearcherScope.INTERNAL, true);
                 }
-
-                refreshLastCommittedSegmentInfos();
             } catch (FlushFailedEngineException ex) {
                 maybeFailEngine("flush", ex);
                 throw ex;
@@ -688,33 +668,6 @@ public class IngestionEngine extends Engine {
             } finally {
                 flushLock.unlock();
             }
-        }
-    }
-
-    private void refreshLastCommittedSegmentInfos() {
-        /*
-         * we have to inc-ref the store here since if the engine is closed by a tragic event
-         * we don't acquire the write lock and wait until we have exclusive access. This might also
-         * dec the store reference which can essentially close the store and unless we can inc the reference
-         * we can't use it.
-         */
-        store.incRef();
-        try {
-            // reread the last committed segment infos
-            lastCommittedSegmentInfos = store.readLastCommittedSegmentsInfo();
-        } catch (Exception e) {
-            if (isClosed.get() == false) {
-                try {
-                    logger.warn("failed to read latest segment infos on flush", e);
-                } catch (Exception inner) {
-                    e.addSuppressed(inner);
-                }
-                if (Lucene.isCorruptionException(e)) {
-                    throw new FlushFailedEngineException(shardId, e);
-                }
-            }
-        } finally {
-            store.decRef();
         }
     }
 
@@ -732,7 +685,8 @@ public class IngestionEngine extends Engine {
                 final Map<String, String> commitData = new HashMap<>(3);
 
                 commitData.put(StreamPoller.BATCH_START, streamPoller.getBatchStartPointer().asString());
-                commitData.put(SequenceNumbers.LOCAL_CHECKPOINT_KEY, "0");
+                commitData.put(SequenceNumbers.LOCAL_CHECKPOINT_KEY, "-1");
+                commitData.put(SequenceNumbers.MAX_SEQ_NO, "0");
                 commitData.put(Translog.TRANSLOG_UUID_KEY, "");
                 final String currentForceMergeUUID = forceMergeUUID;
                 if (currentForceMergeUUID != null) {
@@ -1073,5 +1027,57 @@ public class IngestionEngine extends Engine {
             streamPoller.close();
         }
         super.close();
+    }
+
+    private static class IngestionIndexCommit extends IndexCommit {
+        private final IndexCommit index;
+
+        IngestionIndexCommit(IndexCommit index) {
+            this.index = index;
+        }
+
+        @Override
+        public String getSegmentsFileName() {
+            return index.getSegmentsFileName();
+        }
+
+        @Override
+        public Collection<String> getFileNames() throws IOException {
+            return index.getFileNames();
+        }
+
+        @Override
+        public Directory getDirectory() {
+            return index.getDirectory();
+        }
+
+        @Override
+        public void delete() {
+            index.delete();
+        }
+
+        @Override
+        public boolean isDeleted() {
+            return index.isDeleted();
+        }
+
+        @Override
+        public int getSegmentCount() {
+            return index.getSegmentCount();
+        }
+
+        @Override
+        public long getGeneration() {
+            return index.getGeneration();
+        }
+
+        @Override
+        public Map<String, String> getUserData() throws IOException {
+            // todo: add this as part of the commit in commitIndexWriter()?
+            Map<String, String> userData = new HashMap<>();
+            userData.put(SequenceNumbers.LOCAL_CHECKPOINT_KEY, "-1");
+            userData.putAll(index.getUserData());
+            return userData;
+        }
     }
 }

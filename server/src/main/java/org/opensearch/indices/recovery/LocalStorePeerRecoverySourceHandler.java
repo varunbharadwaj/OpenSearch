@@ -112,11 +112,7 @@ public class LocalStorePeerRecoverySourceHandler extends RecoverySourceHandler {
             // advances and not when creating a new safe commit. In any case this is a best-effort thing since future recoveries can
             // always fall back to file-based ones, and only really presents a problem if this primary fails before things have settled
             // down.
-
-            // todo: handle this correctly
-            //startingSeqNo = Long.parseLong(wrappedSafeCommit.get().getUserData().get(SequenceNumbers.LOCAL_CHECKPOINT_KEY)) + 1L;
-            startingSeqNo = Long.parseLong(wrappedSafeCommit.get().getUserData().getOrDefault(SequenceNumbers.LOCAL_CHECKPOINT_KEY, "-1")) + 1L;
-
+            startingSeqNo = Long.parseLong(wrappedSafeCommit.get().getUserData().get(SequenceNumbers.LOCAL_CHECKPOINT_KEY)) + 1L;
             logger.trace("performing file-based recovery followed by history replay starting at [{}]", startingSeqNo);
 
             try {

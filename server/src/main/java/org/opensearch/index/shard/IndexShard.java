@@ -119,19 +119,8 @@ import org.opensearch.index.cache.IndexCache;
 import org.opensearch.index.cache.bitset.ShardBitsetFilterCache;
 import org.opensearch.index.cache.request.ShardRequestCache;
 import org.opensearch.index.codec.CodecService;
-import org.opensearch.index.engine.CommitStats;
-import org.opensearch.index.engine.Engine;
+import org.opensearch.index.engine.*;
 import org.opensearch.index.engine.Engine.GetResult;
-import org.opensearch.index.engine.EngineConfig;
-import org.opensearch.index.engine.EngineConfigFactory;
-import org.opensearch.index.engine.EngineException;
-import org.opensearch.index.engine.EngineFactory;
-import org.opensearch.index.engine.NRTReplicationEngine;
-import org.opensearch.index.engine.ReadOnlyEngine;
-import org.opensearch.index.engine.RefreshFailedEngineException;
-import org.opensearch.index.engine.SafeCommitInfo;
-import org.opensearch.index.engine.Segment;
-import org.opensearch.index.engine.SegmentsStats;
 import org.opensearch.index.fielddata.FieldDataStats;
 import org.opensearch.index.fielddata.ShardFieldData;
 import org.opensearch.index.flush.FlushStats;
@@ -1690,9 +1679,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         remoteSegmentStoreDirectory.releaseLock(primaryTerm, generation, snapshotId);
     }
 
-    public Optional<NRTReplicationEngine> getReplicationEngine() {
-        if (getEngine() instanceof NRTReplicationEngine) {
-            return Optional.of((NRTReplicationEngine) getEngine());
+    public Optional<ReplicationEngine> getReplicationEngine() {
+        if (getEngine() instanceof ReplicationEngine) {
+            return Optional.of((ReplicationEngine) getEngine());
         } else {
             return Optional.empty();
         }

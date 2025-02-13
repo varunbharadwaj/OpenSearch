@@ -18,12 +18,15 @@ import org.opensearch.action.admin.cluster.node.info.NodeInfo;
 import org.opensearch.action.admin.cluster.node.info.NodesInfoRequest;
 import org.opensearch.action.admin.cluster.node.info.NodesInfoResponse;
 import org.opensearch.action.admin.cluster.node.info.PluginsAndModules;
+import org.opensearch.action.admin.indices.flush.FlushResponse;
+import org.opensearch.action.admin.indices.segments.IndicesSegmentResponse;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.index.query.RangeQueryBuilder;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.plugins.PluginInfo;
+import org.opensearch.test.InternalTestCluster;
 import org.opensearch.test.OpenSearchIntegTestCase;
 import org.junit.Assert;
 
@@ -74,7 +77,7 @@ public class IngestFromKafkaIT extends OpenSearchIntegTestCase {
         );
     }
 
-    public void testKafkaIngestion() {
+    public void testKafkaIngestion() throws Exception {
         try {
             setupKafka();
             // create an index with ingestion source from kafka
@@ -92,11 +95,60 @@ public class IngestFromKafkaIT extends OpenSearchIntegTestCase {
                 "{\"properties\":{\"name\":{\"type\": \"text\"},\"age\":{\"type\": \"integer\"}}}}"
             );
 
-            RangeQueryBuilder query = new RangeQueryBuilder("age").gte(21);
             ensureGreen("test");
-            refresh("test");
-            await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
-                SearchResponse response = client().prepareSearch("test").setQuery(query).get();
+            RangeQueryBuilder query = new RangeQueryBuilder("age").gte(21);
+
+            assertBusy(() -> {
+                SearchResponse response = client().prepareSearch("test").setSize(0).setPreference("_primary").get();
+                final long hits = response.getHits().getTotalHits().value();
+                if (hits < 2) {
+                    fail("no hits found on primary shard");
+                }
+            }, 1, TimeUnit.MINUTES);
+
+            flushAndRefresh("test");
+            ensureGreen("test");
+
+            await().atMost(60, TimeUnit.SECONDS).untilAsserted(() -> {
+                SearchResponse response2 = client().prepareSearch("test").setQuery(query).setPreference("_replica").get();
+                assertThat(response2.getHits().getTotalHits().value(), is(1L));
+            });
+        } finally {
+            stopKafka();
+        }
+    }
+
+    public void testSegmentReplication() throws Exception {
+        try {
+            internalCluster().startClusterManagerOnlyNode();
+            setupKafka();
+
+            // start primary node
+            internalCluster().startDataOnlyNode();
+            // start replica node
+            internalCluster().startDataOnlyNode();
+
+            // create an index with ingestion source from kafka
+            createIndex(
+                "test",
+                Settings.builder()
+                    .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+                    .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 1)
+                    .put("ingestion_source.type", "kafka")
+                    .put("ingestion_source.pointer.init.reset", "earliest")
+                    .put("ingestion_source.param.topic", "test")
+                    .put("ingestion_source.param.bootstrap_servers", kafka.getBootstrapServers())
+                    .put("index.replication.type", "SEGMENT")
+                    .build(),
+                "{\"properties\":{\"name\":{\"type\": \"text\"},\"age\":{\"type\": \"integer\"}}}}"
+            );
+            ensureGreen("test");
+            waitForSearchableDocs("test", 2);
+            flushAndRefresh("test");
+            RangeQueryBuilder query = new RangeQueryBuilder("age").gte(21);
+
+            await().atMost(60, TimeUnit.SECONDS).untilAsserted(() -> {
+                SearchResponse response = client().prepareSearch("test").setQuery(query).setPreference("_primary").get();
                 assertThat(response.getHits().getTotalHits().value(), is(1L));
 
                 SearchResponse response2 = client().prepareSearch("test").setQuery(query).setPreference("_replica").get();
@@ -105,6 +157,70 @@ public class IngestFromKafkaIT extends OpenSearchIntegTestCase {
         } finally {
             stopKafka();
         }
+    }
+
+    public void testSegmentReplicationReplicaPromotion() throws Exception {
+        try {
+            internalCluster().startClusterManagerOnlyNode();
+            setupKafka();
+
+            // start primary node
+            String primary = internalCluster().startDataOnlyNode();
+            // start replica node
+            String replica = internalCluster().startDataOnlyNode();
+
+            // create an index with ingestion source from kafka
+            createIndex(
+                "test",
+                Settings.builder()
+                    .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+                    .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 1)
+                    .put("ingestion_source.type", "kafka")
+                    .put("ingestion_source.pointer.init.reset", "earliest")
+                    .put("ingestion_source.param.topic", "test")
+                    .put("ingestion_source.param.bootstrap_servers", kafka.getBootstrapServers())
+                    .put("index.replication.type", "SEGMENT")
+                    .build(),
+                "{\"properties\":{\"name\":{\"type\": \"text\"},\"age\":{\"type\": \"integer\"}}}}"
+            );
+            ensureGreen("test");
+            waitForSearchableDocs("test", 2);
+            flushAndRefresh("test");
+
+            internalCluster().stopRandomNode(InternalTestCluster.nameFilter(primary));
+            ensureYellowAndNoInitializingShards("test");
+
+
+
+            RangeQueryBuilder query = new RangeQueryBuilder("age").gte(21);
+
+            await().atMost(60, TimeUnit.SECONDS).untilAsserted(() -> {
+                SearchResponse response = client().prepareSearch("test").setQuery(query).setPreference("_primary").get();
+                assertThat(response.getHits().getTotalHits().value(), is(1L));
+
+                SearchResponse response2 = client().prepareSearch("test").setQuery(query).setPreference("_replica").get();
+                assertThat(response2.getHits().getTotalHits().value(), is(1L));
+            });
+        } finally {
+            stopKafka();
+        }
+    }
+
+    public void waitForSearchableDocs(String indexName, long docCount) throws Exception {
+        // wait until the replica has the latest segment generation.
+        assertBusy(() -> {
+            final SearchResponse response = client().prepareSearch(indexName).setSize(0).setPreference("_primary").get();
+            final long hits = response.getHits().getTotalHits().value();
+            if (hits < docCount) {
+                fail("primary fail");
+            }
+
+            final SearchResponse response2 = client().prepareSearch(indexName).setSize(0).setPreference("_replica").get();
+            final long hits2 = response2.getHits().getTotalHits().value();
+            if (hits2 < docCount) {
+                fail("replica fail");
+            }
+        }, 1, TimeUnit.MINUTES);
     }
 
     private void setupKafka() {

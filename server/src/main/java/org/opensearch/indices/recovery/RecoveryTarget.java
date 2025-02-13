@@ -266,8 +266,7 @@ public class RecoveryTarget extends ReplicationTarget implements RecoveryTargetH
     }
 
     private boolean hasUncommittedOperations() throws IOException {
-        // todo: fix this
-        long localCheckpointOfCommit = Long.parseLong(indexShard.commitStats().getUserData().getOrDefault(SequenceNumbers.LOCAL_CHECKPOINT_KEY, "0"));
+        long localCheckpointOfCommit = Long.parseLong(indexShard.commitStats().getUserData().get(SequenceNumbers.LOCAL_CHECKPOINT_KEY));
         return indexShard.countNumberOfHistoryOperations(
             RecoverySourceHandler.PEER_RECOVERY_NAME,
             localCheckpointOfCommit + 1,

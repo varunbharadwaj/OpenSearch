@@ -24,13 +24,7 @@ import org.opensearch.core.common.unit.ByteSizeValue;
 import org.opensearch.index.seqno.LocalCheckpointTracker;
 import org.opensearch.index.seqno.SeqNoStats;
 import org.opensearch.index.seqno.SequenceNumbers;
-import org.opensearch.index.translog.Translog;
-import org.opensearch.index.translog.TranslogCorruptedException;
-import org.opensearch.index.translog.TranslogDeletionPolicy;
-import org.opensearch.index.translog.TranslogException;
-import org.opensearch.index.translog.TranslogManager;
-import org.opensearch.index.translog.WriteOnlyTranslogManager;
-import org.opensearch.index.translog.listener.TranslogEventListener;
+import org.opensearch.index.translog.*;
 import org.opensearch.search.suggest.completion.CompletionStats;
 
 import java.io.Closeable;
@@ -38,14 +32,14 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
-import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiFunction;
 
 import static org.opensearch.index.seqno.SequenceNumbers.MAX_SEQ_NO;
+import static org.opensearch.index.translog.Translog.EMPTY_TRANSLOG_LOCATION;
+import static org.opensearch.index.translog.Translog.EMPTY_TRANSLOG_SNAPSHOT;
 
 /**
  * This is an {@link Engine} implementation intended for replica shards when Segment Replication
@@ -55,13 +49,13 @@ import static org.opensearch.index.seqno.SequenceNumbers.MAX_SEQ_NO;
  * @opensearch.api
  */
 @PublicApi(since = "1.0.0")
-public class NRTReplicationEngine extends ReplicationEngine {
+public class IngestionReplicationEngine extends ReplicationEngine {
 
     private volatile SegmentInfos lastCommittedSegmentInfos;
     private final NRTReplicationReaderManager readerManager;
     private final CompletionStatsCache completionStatsCache;
     private final LocalCheckpointTracker localCheckpointTracker;
-    private final WriteOnlyTranslogManager translogManager;
+    private final TranslogManager translogManager;
     private final Lock flushLock = new ReentrantLock();
     protected final ReplicaFileTracker replicaFileTracker;
 
@@ -69,11 +63,10 @@ public class NRTReplicationEngine extends ReplicationEngine {
 
     private static final int SI_COUNTER_INCREMENT = 10;
 
-    public NRTReplicationEngine(EngineConfig engineConfig) {
+    public IngestionReplicationEngine(EngineConfig engineConfig) {
         super(engineConfig);
         store.incRef();
         NRTReplicationReaderManager readerManager = null;
-        WriteOnlyTranslogManager translogManagerRef = null;
         boolean success = false;
         try {
             this.replicaFileTracker = new ReplicaFileTracker(store::deleteQuiet);
@@ -97,43 +90,18 @@ public class NRTReplicationEngine extends ReplicationEngine {
             for (ReferenceManager.RefreshListener listener : engineConfig.getInternalRefreshListener()) {
                 this.readerManager.addListener(listener);
             }
-            final Map<String, String> userData = this.lastCommittedSegmentInfos.getUserData();
-            final String translogUUID = Objects.requireNonNull(userData.get(Translog.TRANSLOG_UUID_KEY));
-            translogManagerRef = new WriteOnlyTranslogManager(
-                engineConfig.getTranslogConfig(),
-                engineConfig.getPrimaryTermSupplier(),
-                engineConfig.getGlobalCheckpointSupplier(),
-                getTranslogDeletionPolicy(engineConfig),
+            this.translogManager = new NoOpTranslogManager(
                 shardId,
                 readLock,
-                this::getLocalCheckpointTracker,
-                translogUUID,
-                new TranslogEventListener() {
-                    @Override
-                    public void onFailure(String reason, Exception ex) {
-                        failEngine(reason, ex);
-                    }
-
-                    @Override
-                    public void onAfterTranslogSync() {
-                        try {
-                            translogManager.trimUnreferencedReaders();
-                        } catch (IOException ex) {
-                            throw new TranslogException(shardId, "failed to trim unreferenced translog readers", ex);
-                        }
-                    }
-                },
-                this,
-                engineConfig.getTranslogFactory(),
-                engineConfig.getStartedPrimarySupplier()
+                this::ensureOpen,
+                new TranslogStats(0, 0, 0, 0, 0),
+                EMPTY_TRANSLOG_SNAPSHOT
             );
-            this.translogManager = translogManagerRef;
             success = true;
         } catch (IOException | TranslogCorruptedException e) {
             throw new EngineCreationFailureException(shardId, "failed to create engine", e);
         } finally {
             if (success == false) {
-                IOUtils.closeWhileHandlingException(readerManager, translogManagerRef);
                 if (isClosed.get() == false) {
                     // failure, we need to dec the store reference
                     store.decRef();
@@ -163,7 +131,7 @@ public class NRTReplicationEngine extends ReplicationEngine {
         try (ReleasableLock lock = writeLock.acquire()) {
             // Update the current infos reference on the Engine's reader.
             ensureOpen();
-            final long maxSeqNo = Long.parseLong(infos.userData.get(MAX_SEQ_NO));
+            //final long maxSeqNo = Long.parseLong(infos.userData.get(MAX_SEQ_NO));
             final long incomingGeneration = infos.getGeneration();
             readerManager.updateSegments(infos);
             // Ensure that we commit and clear the local translog if a new commit has been made on the primary.
@@ -172,11 +140,9 @@ public class NRTReplicationEngine extends ReplicationEngine {
             // In that case we still commit into the next local generation.
             if (incomingGeneration != this.lastReceivedPrimaryGen) {
                 flush(false, true);
-                translogManager.getDeletionPolicy().setLocalCheckpointOfSafeCommit(maxSeqNo);
-                translogManager.rollTranslogGeneration();
             }
             this.lastReceivedPrimaryGen = incomingGeneration;
-            localCheckpointTracker.fastForwardProcessedSeqNo(maxSeqNo);
+            //localCheckpointTracker.fastForwardProcessedSeqNo(maxSeqNo);
         }
     }
 
@@ -190,13 +156,12 @@ public class NRTReplicationEngine extends ReplicationEngine {
     private void commitSegmentInfos(SegmentInfos infos) throws IOException {
         // get a reference to the previous commit files so they can be decref'd once a new commit is made.
         final Collection<String> previousCommitFiles = getLastCommittedSegmentInfos().files(true);
-        store.commitSegmentInfos(infos, localCheckpointTracker.getMaxSeqNo(), localCheckpointTracker.getProcessedCheckpoint());
+        store.commitSegmentInfos(infos, 0, 0);
         this.lastCommittedSegmentInfos = store.readLastCommittedSegmentsInfo();
         // incref the latest on-disk commit.
         replicaFileTracker.incRef(this.lastCommittedSegmentInfos.files(true));
         // decref the prev commit.
         replicaFileTracker.decRef(previousCommitFiles);
-        translogManager.syncTranslog();
     }
 
     private void commitSegmentInfos() throws IOException {
@@ -232,7 +197,7 @@ public class NRTReplicationEngine extends ReplicationEngine {
     public IndexResult index(Index index) throws IOException {
         ensureOpen();
         IndexResult indexResult = new IndexResult(index.version(), index.primaryTerm(), index.seqNo(), false);
-        final Translog.Location location = translogManager.add(new Translog.Index(index, indexResult));
+        final Translog.Location location = EMPTY_TRANSLOG_LOCATION;
         indexResult.setTranslogLocation(location);
         indexResult.setTook(System.nanoTime() - index.startTime());
         indexResult.freeze();
@@ -244,7 +209,7 @@ public class NRTReplicationEngine extends ReplicationEngine {
     public DeleteResult delete(Delete delete) throws IOException {
         ensureOpen();
         DeleteResult deleteResult = new DeleteResult(delete.version(), delete.primaryTerm(), delete.seqNo(), true);
-        final Translog.Location location = translogManager.add(new Translog.Delete(delete, deleteResult));
+        final Translog.Location location = EMPTY_TRANSLOG_LOCATION;
         deleteResult.setTranslogLocation(location);
         deleteResult.setTook(System.nanoTime() - delete.startTime());
         deleteResult.freeze();
@@ -256,7 +221,7 @@ public class NRTReplicationEngine extends ReplicationEngine {
     public NoOpResult noOp(NoOp noOp) throws IOException {
         ensureOpen();
         NoOpResult noOpResult = new NoOpResult(noOp.primaryTerm(), noOp.seqNo());
-        final Translog.Location location = translogManager.add(new Translog.NoOp(noOp.seqNo(), noOp.primaryTerm(), noOp.reason()));
+        final Translog.Location location = EMPTY_TRANSLOG_LOCATION;
         noOpResult.setTranslogLocation(location);
         noOpResult.setTook(System.nanoTime() - noOp.startTime());
         noOpResult.freeze();
@@ -329,12 +294,12 @@ public class NRTReplicationEngine extends ReplicationEngine {
 
     @Override
     public SeqNoStats getSeqNoStats(long globalCheckpoint) {
-        return localCheckpointTracker.getStats(globalCheckpoint);
+        return new SeqNoStats(0, 0, 0);
     }
 
     @Override
     public long getLastSyncedGlobalCheckpoint() {
-        return translogManager.getLastSyncedGlobalCheckpoint();
+        return 0;
     }
 
     @Override
@@ -454,7 +419,7 @@ public class NRTReplicationEngine extends ReplicationEngine {
                         }
                     }
                 }
-                IOUtils.close(readerManager, translogManager);
+                IOUtils.close(readerManager);
             } catch (Exception e) {
                 logger.error("failed to close engine", e);
             } finally {
@@ -495,9 +460,7 @@ public class NRTReplicationEngine extends ReplicationEngine {
 
     @Override
     public void onSettingsChanged(TimeValue translogRetentionAge, ByteSizeValue translogRetentionSize, long softDeletesRetentionOps) {
-        final TranslogDeletionPolicy translogDeletionPolicy = translogManager.getDeletionPolicy();
-        translogDeletionPolicy.setRetentionAgeInMillis(translogRetentionAge.millis());
-        translogDeletionPolicy.setRetentionSizeInBytes(translogRetentionSize.getBytes());
+
     }
 
     @Override
