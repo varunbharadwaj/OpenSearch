@@ -57,17 +57,17 @@ import static org.opensearch.index.seqno.SequenceNumbers.MAX_SEQ_NO;
 @PublicApi(since = "1.0.0")
 public class NRTReplicationEngine extends Engine {
 
-    private volatile SegmentInfos lastCommittedSegmentInfos;
-    private final NRTReplicationReaderManager readerManager;
-    private final CompletionStatsCache completionStatsCache;
-    private final LocalCheckpointTracker localCheckpointTracker;
-    private final WriteOnlyTranslogManager translogManager;
-    private final Lock flushLock = new ReentrantLock();
+    protected volatile SegmentInfos lastCommittedSegmentInfos;
+    protected final NRTReplicationReaderManager readerManager;
+    protected final CompletionStatsCache completionStatsCache;
+    protected final LocalCheckpointTracker localCheckpointTracker;
+    protected final WriteOnlyTranslogManager translogManager;
+    protected final Lock flushLock = new ReentrantLock();
     protected final ReplicaFileTracker replicaFileTracker;
 
-    private volatile long lastReceivedPrimaryGen = SequenceNumbers.NO_OPS_PERFORMED;
+    protected volatile long lastReceivedPrimaryGen = SequenceNumbers.NO_OPS_PERFORMED;
 
-    private static final int SI_COUNTER_INCREMENT = 10;
+    protected static final int SI_COUNTER_INCREMENT = 10;
 
     public NRTReplicationEngine(EngineConfig engineConfig) {
         super(engineConfig);
@@ -97,36 +97,7 @@ public class NRTReplicationEngine extends Engine {
             for (ReferenceManager.RefreshListener listener : engineConfig.getInternalRefreshListener()) {
                 this.readerManager.addListener(listener);
             }
-            final Map<String, String> userData = this.lastCommittedSegmentInfos.getUserData();
-            final String translogUUID = Objects.requireNonNull(userData.get(Translog.TRANSLOG_UUID_KEY));
-            translogManagerRef = new WriteOnlyTranslogManager(
-                engineConfig.getTranslogConfig(),
-                engineConfig.getPrimaryTermSupplier(),
-                engineConfig.getGlobalCheckpointSupplier(),
-                getTranslogDeletionPolicy(engineConfig),
-                shardId,
-                readLock,
-                this::getLocalCheckpointTracker,
-                translogUUID,
-                new TranslogEventListener() {
-                    @Override
-                    public void onFailure(String reason, Exception ex) {
-                        failEngine(reason, ex);
-                    }
-
-                    @Override
-                    public void onAfterTranslogSync() {
-                        try {
-                            translogManager.trimUnreferencedReaders();
-                        } catch (IOException ex) {
-                            throw new TranslogException(shardId, "failed to trim unreferenced translog readers", ex);
-                        }
-                    }
-                },
-                this,
-                engineConfig.getTranslogFactory(),
-                engineConfig.getStartedPrimarySupplier()
-            );
+            translogManagerRef = createWriteOnlyTranslogManager();
             this.translogManager = translogManagerRef;
             success = true;
         } catch (IOException | TranslogCorruptedException e) {
@@ -142,11 +113,45 @@ public class NRTReplicationEngine extends Engine {
         }
     }
 
+    protected WriteOnlyTranslogManager createWriteOnlyTranslogManager() throws IOException {
+        final Map<String, String> userData = this.lastCommittedSegmentInfos.getUserData();
+        final String translogUUID = Objects.requireNonNull(userData.get(Translog.TRANSLOG_UUID_KEY));
+
+        return new WriteOnlyTranslogManager(
+            engineConfig.getTranslogConfig(),
+            engineConfig.getPrimaryTermSupplier(),
+            engineConfig.getGlobalCheckpointSupplier(),
+            getTranslogDeletionPolicy(engineConfig),
+            shardId,
+            readLock,
+            this::getLocalCheckpointTracker,
+            translogUUID,
+            new TranslogEventListener() {
+                @Override
+                public void onFailure(String reason, Exception ex) {
+                    failEngine(reason, ex);
+                }
+
+                @Override
+                public void onAfterTranslogSync() {
+                    try {
+                        translogManager.trimUnreferencedReaders();
+                    } catch (IOException ex) {
+                        throw new TranslogException(shardId, "failed to trim unreferenced translog readers", ex);
+                    }
+                }
+            },
+            this,
+            engineConfig.getTranslogFactory(),
+            engineConfig.getStartedPrimarySupplier()
+        );
+    }
+
     public void cleanUnreferencedFiles() throws IOException {
         replicaFileTracker.deleteUnreferencedFiles(store.directory().listAll());
     }
 
-    private NRTReplicationReaderManager buildReaderManager() throws IOException {
+    protected NRTReplicationReaderManager buildReaderManager() throws IOException {
         return new NRTReplicationReaderManager(
             OpenSearchDirectoryReader.wrap(getDirectoryReader(), shardId),
             replicaFileTracker::incRef,
@@ -187,7 +192,7 @@ public class NRTReplicationEngine extends Engine {
      *
      * @throws IOException - When there is an IO error committing the SegmentInfos.
      */
-    private void commitSegmentInfos(SegmentInfos infos) throws IOException {
+    protected void commitSegmentInfos(SegmentInfos infos) throws IOException {
         // get a reference to the previous commit files so they can be decref'd once a new commit is made.
         final Collection<String> previousCommitFiles = getLastCommittedSegmentInfos().files(true);
         store.commitSegmentInfos(infos, localCheckpointTracker.getMaxSeqNo(), localCheckpointTracker.getProcessedCheckpoint());
@@ -199,7 +204,7 @@ public class NRTReplicationEngine extends Engine {
         translogManager.syncTranslog();
     }
 
-    private void commitSegmentInfos() throws IOException {
+    protected void commitSegmentInfos() throws IOException {
         commitSegmentInfos(getLatestSegmentInfos());
     }
 
@@ -232,7 +237,7 @@ public class NRTReplicationEngine extends Engine {
     public IndexResult index(Index index) throws IOException {
         ensureOpen();
         IndexResult indexResult = new IndexResult(index.version(), index.primaryTerm(), index.seqNo(), false);
-        final Translog.Location location = translogManager.add(new Translog.Index(index, indexResult));
+        final Translog.Location location = getTranslogIndexLocation(index, indexResult);
         indexResult.setTranslogLocation(location);
         indexResult.setTook(System.nanoTime() - index.startTime());
         indexResult.freeze();
@@ -244,7 +249,7 @@ public class NRTReplicationEngine extends Engine {
     public DeleteResult delete(Delete delete) throws IOException {
         ensureOpen();
         DeleteResult deleteResult = new DeleteResult(delete.version(), delete.primaryTerm(), delete.seqNo(), true);
-        final Translog.Location location = translogManager.add(new Translog.Delete(delete, deleteResult));
+        final Translog.Location location = getTranslogDeleteLocation(delete, deleteResult);
         deleteResult.setTranslogLocation(location);
         deleteResult.setTook(System.nanoTime() - delete.startTime());
         deleteResult.freeze();
@@ -256,12 +261,24 @@ public class NRTReplicationEngine extends Engine {
     public NoOpResult noOp(NoOp noOp) throws IOException {
         ensureOpen();
         NoOpResult noOpResult = new NoOpResult(noOp.primaryTerm(), noOp.seqNo());
-        final Translog.Location location = translogManager.add(new Translog.NoOp(noOp.seqNo(), noOp.primaryTerm(), noOp.reason()));
+        final Translog.Location location = getTranslogNoOpLocation(noOp);
         noOpResult.setTranslogLocation(location);
         noOpResult.setTook(System.nanoTime() - noOp.startTime());
         noOpResult.freeze();
         localCheckpointTracker.advanceMaxSeqNo(noOp.seqNo());
         return noOpResult;
+    }
+
+    protected Translog.Location getTranslogIndexLocation(Index index, IndexResult indexResult) throws IOException {
+        return translogManager.add(new Translog.Index(index, indexResult));
+    }
+
+    protected Translog.Location getTranslogDeleteLocation(Delete delete, DeleteResult deleteResult) throws IOException {
+        return translogManager.add(new Translog.Delete(delete, deleteResult));
+    }
+
+    protected Translog.Location getTranslogNoOpLocation(NoOp noOp) throws IOException {
+        return translogManager.add(new Translog.NoOp(noOp.seqNo(), noOp.primaryTerm(), noOp.reason()));
     }
 
     @Override
@@ -528,7 +545,7 @@ public class NRTReplicationEngine extends Engine {
         return localCheckpointTracker;
     }
 
-    private DirectoryReader getDirectoryReader() throws IOException {
+    protected DirectoryReader getDirectoryReader() throws IOException {
         // for segment replication: replicas should create the reader from store, we don't want an open IW on replicas.
         return new SoftDeletesDirectoryReaderWrapper(DirectoryReader.open(store.directory()), Lucene.SOFT_DELETES_FIELD);
     }

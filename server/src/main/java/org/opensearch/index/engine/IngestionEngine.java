@@ -16,6 +16,7 @@ import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.MergePolicy;
 import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.index.SegmentInfos;
+import org.apache.lucene.index.StandardDirectoryReader;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.ReferenceManager;
 import org.apache.lucene.store.AlreadyClosedException;
@@ -48,6 +49,7 @@ import org.opensearch.index.mapper.ParseContext;
 import org.opensearch.index.merge.MergeStats;
 import org.opensearch.index.merge.OnGoingMerge;
 import org.opensearch.index.seqno.SeqNoStats;
+import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.OpenSearchMergePolicy;
 import org.opensearch.index.translog.NoOpTranslogManager;
 import org.opensearch.index.translog.Translog;
@@ -129,6 +131,15 @@ public class IngestionEngine extends Engine {
             documentMapperForType = engineConfig.getDocumentMapperForTypeSupplier().get();
             this.ingestionConsumerFactory = Objects.requireNonNull(ingestionConsumerFactory);
 
+            // Register internal and external refresh listeners. These include replication checkpoint listener among
+            // others which are required to initiate segment replication after a refresh
+            for (ReferenceManager.RefreshListener listener : engineConfig.getExternalRefreshListener()) {
+                this.externalReaderManager.addListener(listener);
+            }
+            for (ReferenceManager.RefreshListener listener : engineConfig.getInternalRefreshListener()) {
+                this.internalReaderManager.addListener(listener);
+            }
+
             success = true;
         } catch (IOException | TranslogCorruptedException e) {
             throw new EngineCreationFailureException(shardId, "failed to create engine", e);
@@ -192,7 +203,11 @@ public class IngestionEngine extends Engine {
         }
 
         streamPoller = new DefaultStreamPoller(startPointer, persistedPointers, ingestionShardConsumer, this, resetState);
-        streamPoller.start();
+
+        // Poller is only started on the primary shard. Replica shards will rely on segment replication.
+        if (!engineConfig.isReadOnlyReplica()) {
+            streamPoller.start();
+        }
     }
 
     private IndexWriter createWriter() throws IOException {
@@ -391,7 +406,28 @@ public class IngestionEngine extends Engine {
 
     @Override
     protected SegmentInfos getLatestSegmentInfos() {
-        throw new UnsupportedOperationException();
+        try (final GatedCloseable<SegmentInfos> snapshot = getSegmentInfosSnapshot()) {
+            return snapshot.get();
+        } catch (IOException e) {
+            throw new EngineException(shardId, e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public GatedCloseable<SegmentInfos> getSegmentInfosSnapshot() {
+        final OpenSearchDirectoryReader reader;
+        try {
+            reader = internalReaderManager.acquire();
+            return new GatedCloseable<>(((StandardDirectoryReader) reader.getDelegate()).getSegmentInfos(), () -> {
+                try {
+                    internalReaderManager.release(reader);
+                } catch (AlreadyClosedException e) {
+                    logger.warn("Engine is already closed.", e);
+                }
+            });
+        } catch (IOException e) {
+            throw new EngineException(shardId, e.getMessage(), e);
+        }
     }
 
     @Override
@@ -461,12 +497,20 @@ public class IngestionEngine extends Engine {
 
     @Override
     protected ReferenceManager<OpenSearchDirectoryReader> getReferenceManager(SearcherScope scope) {
-        return externalReaderManager;
+        switch (scope) {
+            case INTERNAL:
+                return internalReaderManager;
+            case EXTERNAL:
+                return externalReaderManager;
+            default:
+                throw new IllegalStateException("unknown scope: " + scope);
+        }
     }
 
     @Override
     public Closeable acquireHistoryRetentionLock() {
-        throw new UnsupportedOperationException("Not implemented");
+        // do not need to retain operations as they can be replayed from ingestion source
+        return () -> {};
     }
 
     @Override
@@ -477,7 +521,7 @@ public class IngestionEngine extends Engine {
         boolean requiredFullRange,
         boolean accurateCount
     ) throws IOException {
-        throw new UnsupportedOperationException("Not implemented");
+        return EMPTY_TRANSLOG_SNAPSHOT;
     }
 
     @Override
@@ -507,7 +551,8 @@ public class IngestionEngine extends Engine {
 
     @Override
     public SeqNoStats getSeqNoStats(long globalCheckpoint) {
-        return null;
+        // Sequence numbers and checkpoints are not maintained since ingestion only supports segment replication at the moment
+        return new SeqNoStats(0, 0, 0);
     }
 
     @Override
@@ -600,6 +645,11 @@ public class IngestionEngine extends Engine {
 
     @Override
     public boolean shouldPeriodicallyFlush() {
+        ensureOpen();
+        if (shouldPeriodicallyFlushAfterBigMerge.get()) {
+            return true;
+        }
+
         return false;
     }
 
@@ -632,7 +682,8 @@ public class IngestionEngine extends Engine {
                 // (3) the newly created commit points to a different translog generation (can free translog),
                 // or (4) the local checkpoint information in the last commit is stale, which slows down future recoveries.
                 boolean hasUncommittedChanges = indexWriter.hasUncommittedChanges();
-                if (hasUncommittedChanges || force) {
+                boolean shouldPeriodicallyFlush = shouldPeriodicallyFlush();
+                if (hasUncommittedChanges || force || shouldPeriodicallyFlush) {
                     logger.trace("starting commit for flush;");
 
                     // TODO: do we need to close the latest commit as done in InternalEngine?
@@ -646,6 +697,8 @@ public class IngestionEngine extends Engine {
                     // we need to refresh in order to clear older version values
                     refresh("version_table_flush", SearcherScope.INTERNAL, true);
                 }
+
+                refreshLastCommittedSegmentInfos();
             } catch (FlushFailedEngineException ex) {
                 maybeFailEngine("flush", ex);
                 throw ex;
@@ -654,6 +707,33 @@ public class IngestionEngine extends Engine {
             } finally {
                 flushLock.unlock();
             }
+        }
+    }
+
+    private void refreshLastCommittedSegmentInfos() {
+        /*
+         * we have to inc-ref the store here since if the engine is closed by a tragic event
+         * we don't acquire the write lock and wait until we have exclusive access. This might also
+         * dec the store reference which can essentially close the store and unless we can inc the reference
+         * we can't use it.
+         */
+        store.incRef();
+        try {
+            // reread the last committed segment infos
+            lastCommittedSegmentInfos = store.readLastCommittedSegmentsInfo();
+        } catch (Exception e) {
+            if (isClosed.get() == false) {
+                try {
+                    logger.warn("failed to read latest segment infos on flush", e);
+                } catch (Exception inner) {
+                    e.addSuppressed(inner);
+                }
+                if (Lucene.isCorruptionException(e)) {
+                    throw new FlushFailedEngineException(shardId, e);
+                }
+            }
+        } finally {
+            store.decRef();
         }
     }
 
@@ -668,9 +748,11 @@ public class IngestionEngine extends Engine {
                 /*
                  * The user data captured the min and max range of the stream poller
                  */
-                final Map<String, String> commitData = new HashMap<>(2);
+                final Map<String, String> commitData = new HashMap<>(3);
 
+                // ingestion engine only tracks batch start pointer and does not explicitly track checkpoints
                 commitData.put(StreamPoller.BATCH_START, streamPoller.getBatchStartPointer().asString());
+                commitData.put(SequenceNumbers.LOCAL_CHECKPOINT_KEY, "0");
                 final String currentForceMergeUUID = forceMergeUUID;
                 if (currentForceMergeUUID != null) {
                     commitData.put(FORCE_MERGE_UUID_KEY, currentForceMergeUUID);
@@ -678,6 +760,8 @@ public class IngestionEngine extends Engine {
                 logger.trace("committing writer with commit data [{}]", commitData);
                 return commitData.entrySet().iterator();
             });
+
+            shouldPeriodicallyFlushAfterBigMerge.set(false);
             writer.commit();
         } catch (final Exception ex) {
             try {

@@ -2483,6 +2483,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     }
 
     private void loadGlobalCheckpointToReplicationTracker() throws IOException {
+        if (isIngestionSource()) {
+            // global checkpoints are not used for ingestion source
+            return;
+        }
+
         // we have to set it before we open an engine and recover from the translog because
         // acquiring a snapshot from the translog causes a sync which causes the global checkpoint to be pulled in,
         // and an engine can be forced to close in ctor which also causes the global checkpoint to be pulled in.
@@ -5420,4 +5425,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         }
         return ShardMigrationState.DOCREP_NON_MIGRATING;
     }
+
+    private boolean isIngestionSource() {
+        return indexSettings().getIndexMetadata().useIngestionSource();
+    }
+
 }

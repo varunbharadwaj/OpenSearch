@@ -45,7 +45,7 @@ import static org.awaitility.Awaitility.await;
 /**
  * Integration test for Kafka ingestion
  */
-@ThreadLeakFilters(filters = TestContainerWatchdogThreadLeakFilter.class)
+@ThreadLeakFilters(filters = TestContainerThreadLeakFilter.class)
 public class IngestFromKafkaIT extends OpenSearchIntegTestCase {
     static final String topicName = "test";
 
@@ -82,20 +82,27 @@ public class IngestFromKafkaIT extends OpenSearchIntegTestCase {
                 "test",
                 Settings.builder()
                     .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
-                    .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
+                    .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 1)
                     .put("ingestion_source.type", "kafka")
                     .put("ingestion_source.pointer.init.reset", "earliest")
                     .put("ingestion_source.param.topic", "test")
                     .put("ingestion_source.param.bootstrap_servers", kafka.getBootstrapServers())
+                    .put("index.replication.type", "SEGMENT")
                     .build(),
                 "{\"properties\":{\"name\":{\"type\": \"text\"},\"age\":{\"type\": \"integer\"}}}}"
             );
 
+            ensureGreen("test");
+            flushAndRefresh("test");
             RangeQueryBuilder query = new RangeQueryBuilder("age").gte(21);
+
             await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
                 refresh("test");
-                SearchResponse response = client().prepareSearch("test").setQuery(query).get();
-                assertThat(response.getHits().getTotalHits().value(), is(1L));
+                SearchResponse primaryResponse = client().prepareSearch("test").setQuery(query).setPreference("_primary").get();
+                assertThat(primaryResponse.getHits().getTotalHits().value(), is(1L));
+
+                SearchResponse replicaResponse = client().prepareSearch("test").setQuery(query).setPreference("_replica").get();
+                assertThat(replicaResponse.getHits().getTotalHits().value(), is(1L));
             });
         } finally {
             stopKafka();
