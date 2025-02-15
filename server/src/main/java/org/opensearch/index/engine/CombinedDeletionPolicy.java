@@ -139,7 +139,7 @@ public class CombinedDeletionPolicy extends IndexDeletionPolicy {
             + newSafeCommit.getGeneration();
     }
 
-    private void deleteCommit(IndexCommit commit) throws IOException {
+    protected void deleteCommit(IndexCommit commit) throws IOException {
         assert commit.isDeleted() == false : "Index commit [" + commitDescription(commit) + "] is deleted twice";
         logger.debug("Delete index commit [{}]", commitDescription(commit));
         commit.delete();
@@ -160,7 +160,7 @@ public class CombinedDeletionPolicy extends IndexDeletionPolicy {
         return SegmentInfos.readCommit(indexCommit.getDirectory(), indexCommit.getSegmentsFileName()).totalMaxDoc();
     }
 
-    SafeCommitInfo getSafeCommitInfo() {
+    protected SafeCommitInfo getSafeCommitInfo() {
         return safeCommitInfo;
     }
 
@@ -268,8 +268,8 @@ public class CombinedDeletionPolicy extends IndexDeletionPolicy {
      *
      * @opensearch.internal
      */
-    private static class SnapshotIndexCommit extends IndexCommit {
-        private final IndexCommit delegate;
+    protected static class SnapshotIndexCommit extends IndexCommit {
+        final IndexCommit delegate;
 
         SnapshotIndexCommit(IndexCommit delegate) {
             this.delegate = delegate;

@@ -67,10 +67,6 @@ public class IngestionNRTReplicationEngine extends NRTReplicationEngine {
             ensureOpen();
             final long incomingGeneration = infos.getGeneration();
             readerManager.updateSegments(infos);
-            // Ensure that we commit and clear the local translog if a new commit has been made on the primary.
-            // We do not compare against the last local commit gen here because it is possible to receive
-            // a lower gen from a newly elected primary shard that is behind this shard's last commit gen.
-            // In that case we still commit into the next local generation.
             if (incomingGeneration != this.lastReceivedPrimaryGen) {
                 flush(false, true);
             }

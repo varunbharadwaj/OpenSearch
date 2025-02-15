@@ -8,7 +8,6 @@
 
 package org.opensearch.index.engine;
 
-import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.index.IndexWriter;
@@ -100,6 +99,7 @@ public class IngestionEngine extends Engine {
     private final TranslogManager translogManager;
     private final DocumentMapperForType documentMapperForType;
     private final IngestionConsumerFactory ingestionConsumerFactory;
+    private final IngestionDeletionPolicy ingestionDeletionPolicy;
     private StreamPoller streamPoller;
 
     /**
@@ -118,6 +118,7 @@ public class IngestionEngine extends Engine {
             IndexMetadata indexMetadata = engineConfig.getIndexSettings().getIndexMetadata();
             assert indexMetadata != null;
             mergeScheduler = new EngineMergeScheduler(engineConfig.getShardId(), engineConfig.getIndexSettings());
+            this.ingestionDeletionPolicy = new IngestionDeletionPolicy(logger);
             indexWriter = createWriter();
             externalReaderManager = createReaderManager(new InternalEngine.RefreshWarmerListener(logger, isClosed, engineConfig));
             internalReaderManager = externalReaderManager.internalReaderManager;
@@ -346,6 +347,7 @@ public class IngestionEngine extends Engine {
         final IndexWriterConfig iwc = new IndexWriterConfig(engineConfig.getAnalyzer());
         iwc.setCommitOnClose(false); // we by default don't commit on close
         iwc.setOpenMode(IndexWriterConfig.OpenMode.APPEND);
+        iwc.setIndexDeletionPolicy(ingestionDeletionPolicy);
         // with tests.verbose, lucene sets this up: plumb to align with filesystem stream
         boolean verbose = false;
         try {
@@ -390,7 +392,7 @@ public class IngestionEngine extends Engine {
             iwc.setLeafSorter(config().getLeafSorter()); // The default segment search order
         }
 
-        return new IndexWriterConfig(new StandardAnalyzer());
+        return iwc;
     }
 
     @Override
@@ -893,28 +895,24 @@ public class IngestionEngine extends Engine {
 
     @Override
     public GatedCloseable<IndexCommit> acquireLastIndexCommit(boolean flushFirst) throws EngineException {
-        store.incRef();
-        try {
-            var reader = getReferenceManager(SearcherScope.INTERNAL).acquire();
-            return new GatedCloseable<>(reader.getIndexCommit(), () -> {
-                store.decRef();
-                getReferenceManager(SearcherScope.INTERNAL).release(reader);
-            });
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+        if (flushFirst) {
+            logger.trace("start flush for snapshot");
+            flush(false, true);
+            logger.trace("finish flush for snapshot");
         }
+
+        IndexCommit lastIndexCommit = ingestionDeletionPolicy.acquireIndexCommit();
+        return new GatedCloseable<>(lastIndexCommit, () -> releaseIndexCommit(lastIndexCommit));
     }
 
     @Override
     public GatedCloseable<IndexCommit> acquireSafeIndexCommit() throws EngineException {
-        // TODO: do we need this? likely not
         return acquireLastIndexCommit(false);
     }
 
     @Override
     public SafeCommitInfo getSafeCommitInfo() {
-        // TODO: do we need this?
-        return SafeCommitInfo.EMPTY;
+        return ingestionDeletionPolicy.getSafeCommitInfo();
     }
 
     @Override
@@ -948,6 +946,19 @@ public class IngestionEngine extends Engine {
                     closedLatch.countDown();
                 }
             }
+        }
+    }
+
+    /**
+     * Release index commit. If no references are held, attempt cleanup of unused index files.
+     */
+    private void releaseIndexCommit(IndexCommit indexCommit) throws IOException {
+        try {
+            if (ingestionDeletionPolicy.releaseCommit(indexCommit)) {
+                indexWriter.deleteUnusedFiles();
+            }
+        } catch (AlreadyClosedException ignored) {
+            // no-op, failed cleaning up unused index files, will be attempted again next time
         }
     }
 
