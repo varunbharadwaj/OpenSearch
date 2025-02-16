@@ -80,7 +80,9 @@ import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.UnaryOperator;
 
+import static org.opensearch.index.seqno.SequenceNumbers.MAX_SEQ_NO;
 import static org.opensearch.index.translog.Translog.EMPTY_TRANSLOG_SNAPSHOT;
+import static org.opensearch.index.translog.Translog.TRANSLOG_UUID_KEY;
 
 /**
  * IngestionEngine is an engine that ingests data from a stream source.
@@ -752,9 +754,14 @@ public class IngestionEngine extends Engine {
                  */
                 final Map<String, String> commitData = new HashMap<>(3);
 
-                // ingestion engine only tracks batch start pointer and does not explicitly track checkpoints
+                // Ingestion engine only tracks batch start pointer and does not explicitly track checkpoints.
+                // But we add default values for translog, checkpoints and sequence numbers since they are required
+                // to reuse NRTReplicationEngine on replica nodes.
                 commitData.put(StreamPoller.BATCH_START, streamPoller.getBatchStartPointer().asString());
                 commitData.put(SequenceNumbers.LOCAL_CHECKPOINT_KEY, "0");
+                commitData.put(TRANSLOG_UUID_KEY, "0");
+                commitData.put(HISTORY_UUID_KEY, "0");
+                commitData.put(MAX_SEQ_NO, "0");
                 final String currentForceMergeUUID = forceMergeUUID;
                 if (currentForceMergeUUID != null) {
                     commitData.put(FORCE_MERGE_UUID_KEY, currentForceMergeUUID);

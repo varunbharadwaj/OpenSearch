@@ -4055,6 +4055,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             isReadOnlyReplica = false;
         }
 
+        if (isIngestionSource()) {
+            // override globalcheckpoints for ingestion source as checkpoints are not used
+            globalCheckpointSupplier = () -> 0;
+        }
+
         return this.engineConfigFactory.newEngineConfig(
             shardId,
             threadPool,
