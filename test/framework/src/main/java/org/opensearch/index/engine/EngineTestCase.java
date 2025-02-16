@@ -62,6 +62,8 @@ import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.BytesRef;
+import org.junit.After;
+import org.junit.Before;
 import org.opensearch.Version;
 import org.opensearch.action.index.IndexRequest;
 import org.opensearch.action.support.replication.ReplicationResponse;
@@ -112,6 +114,7 @@ import org.opensearch.index.seqno.ReplicationTracker;
 import org.opensearch.index.seqno.RetentionLeases;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.store.Store;
+import org.opensearch.index.translog.InternalNoOpTranslogManager;
 import org.opensearch.index.translog.InternalTranslogManager;
 import org.opensearch.index.translog.LocalTranslog;
 import org.opensearch.index.translog.Translog;
@@ -124,8 +127,6 @@ import org.opensearch.test.IndexSettingsModule;
 import org.opensearch.test.OpenSearchTestCase;
 import org.opensearch.threadpool.TestThreadPool;
 import org.opensearch.threadpool.ThreadPool;
-import org.junit.After;
-import org.junit.Before;
 
 import java.io.IOException;
 import java.nio.charset.Charset;
@@ -150,15 +151,15 @@ import java.util.stream.Collectors;
 
 import static java.util.Collections.emptyList;
 import static java.util.Collections.shuffle;
-import static org.opensearch.index.engine.Engine.Operation.Origin.PEER_RECOVERY;
-import static org.opensearch.index.engine.Engine.Operation.Origin.PRIMARY;
-import static org.opensearch.index.engine.Engine.Operation.Origin.REPLICA;
-import static org.opensearch.index.translog.TranslogDeletionPolicies.createTranslogDeletionPolicy;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.opensearch.index.engine.Engine.Operation.Origin.PEER_RECOVERY;
+import static org.opensearch.index.engine.Engine.Operation.Origin.PRIMARY;
+import static org.opensearch.index.engine.Engine.Operation.Origin.REPLICA;
+import static org.opensearch.index.translog.TranslogDeletionPolicies.createTranslogDeletionPolicy;
 
 public abstract class EngineTestCase extends OpenSearchTestCase {
 
@@ -1607,6 +1608,14 @@ public abstract class EngineTestCase extends OpenSearchTestCase {
             : "only InternalEngines or NRTReplicationEngines have translogs, got: " + engine.getClass();
         engine.ensureOpen();
         TranslogManager translogManager = engine.translogManager();
+
+        // InternalNoOpTranslogManager does not use a real translog and hence not required to close.
+        // The only place this method is called in ingestion tests is to validate translog is closed, hence throw
+        // AlreadyClosedException
+        if (translogManager instanceof InternalNoOpTranslogManager) {
+            throw new AlreadyClosedException("InternalNoOpTranslogManager uses no-op translog");
+        }
+
         assert translogManager instanceof InternalTranslogManager : "only InternalTranslogManager have translogs, got: "
             + engine.getClass();
         InternalTranslogManager internalTranslogManager = (InternalTranslogManager) translogManager;

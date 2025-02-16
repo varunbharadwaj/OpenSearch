@@ -104,6 +104,7 @@ import org.opensearch.index.seqno.LocalCheckpointTracker;
 import org.opensearch.index.seqno.SeqNoStats;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.OpenSearchMergePolicy;
+import org.opensearch.index.translog.InternalEngineTranslogManager;
 import org.opensearch.index.translog.InternalTranslogManager;
 import org.opensearch.index.translog.Translog;
 import org.opensearch.index.translog.TranslogCorruptedException;
@@ -147,56 +148,56 @@ public class InternalEngine extends Engine {
     /**
      * When we last pruned expired tombstones from versionMap.deletes:
      */
-    private volatile long lastDeleteVersionPruneTimeMSec;
+    protected volatile long lastDeleteVersionPruneTimeMSec;
 
-    private final InternalTranslogManager translogManager;
-    private final OpenSearchConcurrentMergeScheduler mergeScheduler;
+    protected final InternalEngineTranslogManager translogManager;
+    protected final OpenSearchConcurrentMergeScheduler mergeScheduler;
 
-    private final IndexWriter indexWriter;
+    protected final IndexWriter indexWriter;
 
-    private final ExternalReaderManager externalReaderManager;
-    private final OpenSearchReaderManager internalReaderManager;
+    protected final ExternalReaderManager externalReaderManager;
+    protected final OpenSearchReaderManager internalReaderManager;
 
-    private final Lock flushLock = new ReentrantLock();
-    private final ReentrantLock optimizeLock = new ReentrantLock();
+    protected final Lock flushLock = new ReentrantLock();
+    protected final ReentrantLock optimizeLock = new ReentrantLock();
 
     // A uid (in the form of BytesRef) to the version map
     // we use the hashed variant since we iterate over it and check removal and additions on existing keys
-    private final LiveVersionMap versionMap = new LiveVersionMap();
+    protected final LiveVersionMap versionMap = new LiveVersionMap();
 
-    private volatile SegmentInfos lastCommittedSegmentInfos;
+    protected volatile SegmentInfos lastCommittedSegmentInfos;
 
-    private final IndexThrottle throttle;
+    protected final IndexThrottle throttle;
 
-    private final LocalCheckpointTracker localCheckpointTracker;
+    protected final LocalCheckpointTracker localCheckpointTracker;
 
-    private final CombinedDeletionPolicy combinedDeletionPolicy;
+    protected final CombinedDeletionPolicy combinedDeletionPolicy;
 
     // How many callers are currently requesting index throttling. Currently there are only two situations where we do this: when merges
     // are falling behind and when writing indexing buffer to disk is too slow. When this is 0, there is no throttling, else we throttling
     // incoming indexing ops to a single thread:
-    private final AtomicInteger throttleRequestCount = new AtomicInteger();
-    private final AtomicLong maxUnsafeAutoIdTimestamp = new AtomicLong(-1);
-    private final AtomicLong maxSeenAutoIdTimestamp = new AtomicLong(-1);
+    protected final AtomicInteger throttleRequestCount = new AtomicInteger();
+    protected final AtomicLong maxUnsafeAutoIdTimestamp = new AtomicLong(-1);
+    protected final AtomicLong maxSeenAutoIdTimestamp = new AtomicLong(-1);
     // max_seq_no_of_updates_or_deletes tracks the max seq_no of update or delete operations that have been processed in this engine.
     // An index request is considered as an update if it overwrites existing documents with the same docId in the Lucene index.
     // The value of this marker never goes backwards, and is tracked/updated differently on primary and replica.
-    private final AtomicLong maxSeqNoOfUpdatesOrDeletes;
-    private final CounterMetric numVersionLookups = new CounterMetric();
-    private final CounterMetric numIndexVersionsLookups = new CounterMetric();
+    protected final AtomicLong maxSeqNoOfUpdatesOrDeletes;
+    protected final CounterMetric numVersionLookups = new CounterMetric();
+    protected final CounterMetric numIndexVersionsLookups = new CounterMetric();
     // Lucene operations since this engine was opened - not include operations from existing segments.
-    private final CounterMetric numDocDeletes = new CounterMetric();
-    private final CounterMetric numDocAppends = new CounterMetric();
-    private final CounterMetric numDocUpdates = new CounterMetric();
-    private final NumericDocValuesField softDeletesField = Lucene.newSoftDeletesField();
-    private final SoftDeletesPolicy softDeletesPolicy;
-    private final LastRefreshedCheckpointListener lastRefreshedCheckpointListener;
+    protected final CounterMetric numDocDeletes = new CounterMetric();
+    protected final CounterMetric numDocAppends = new CounterMetric();
+    protected final CounterMetric numDocUpdates = new CounterMetric();
+    protected final NumericDocValuesField softDeletesField = Lucene.newSoftDeletesField();
+    protected final SoftDeletesPolicy softDeletesPolicy;
+    protected final LastRefreshedCheckpointListener lastRefreshedCheckpointListener;
 
-    private final CompletionStatsCache completionStatsCache;
+    protected final CompletionStatsCache completionStatsCache;
 
-    private final AtomicBoolean trackTranslogLocation = new AtomicBoolean(false);
-    private final KeyedLock<Long> noOpKeyedLock = new KeyedLock<>();
-    private final AtomicBoolean shouldPeriodicallyFlushAfterBigMerge = new AtomicBoolean(false);
+    protected final AtomicBoolean trackTranslogLocation = new AtomicBoolean(false);
+    protected final KeyedLock<Long> noOpKeyedLock = new KeyedLock<>();
+    protected final AtomicBoolean shouldPeriodicallyFlushAfterBigMerge = new AtomicBoolean(false);
 
     /**
      * If multiple writes passed {@link InternalEngine#tryAcquireInFlightDocs(Operation, int)} but they haven't adjusted
@@ -206,18 +207,18 @@ public class InternalEngine extends Engine {
      * {@link InternalEngine#tryAcquireInFlightDocs(Operation, int)}. Although we can double count some inFlight documents in IW and Engine,
      * this shouldn't be an issue because it happens for a short window and we adjust the inFlightDocCount once an indexing is completed.
      */
-    private final AtomicLong inFlightDocCount = new AtomicLong();
+    protected final AtomicLong inFlightDocCount = new AtomicLong();
 
-    private final int maxDocs;
+    protected final int maxDocs;
 
     @Nullable
-    private final String historyUUID;
+    protected final String historyUUID;
 
     /**
      * UUID value that is updated every time the engine is force merged.
      */
     @Nullable
-    private volatile String forceMergeUUID;
+    protected volatile String forceMergeUUID;
 
     public InternalEngine(EngineConfig engineConfig) {
         this(engineConfig, IndexWriter.MAX_DOCS, LocalCheckpointTracker::new, TranslogEventListener.NOOP_TRANSLOG_EVENT_LISTENER);
@@ -249,7 +250,7 @@ public class InternalEngine extends Engine {
         ExternalReaderManager externalReaderManager = null;
         OpenSearchReaderManager internalReaderManager = null;
         EngineMergeScheduler scheduler = null;
-        InternalTranslogManager translogManagerRef = null;
+        InternalEngineTranslogManager translogManagerRef = null;
         boolean success = false;
         try {
             this.lastDeleteVersionPruneTimeMSec = engineConfig.getThreadPool().relativeTimeInMillis();
@@ -280,20 +281,11 @@ public class InternalEngine extends Engine {
                         }
                     }
                 };
-                translogManagerRef = new InternalTranslogManager(
-                    engineConfig.getTranslogConfig(),
-                    engineConfig.getPrimaryTermSupplier(),
-                    engineConfig.getGlobalCheckpointSupplier(),
-                    translogDeletionPolicy,
-                    shardId,
-                    readLock,
-                    this::getLocalCheckpointTracker,
-                    translogUUID,
-                    new CompositeTranslogEventListener(Arrays.asList(internalTranslogEventListener, translogEventListener), shardId),
-                    this::ensureOpen,
-                    engineConfig.getTranslogFactory(),
-                    engineConfig.getStartedPrimarySupplier()
+                CompositeTranslogEventListener compositeTranslogEventListener = new CompositeTranslogEventListener(
+                    Arrays.asList(internalTranslogEventListener, translogEventListener),
+                    shardId
                 );
+                translogManagerRef = createTranslogManager(translogUUID, translogDeletionPolicy, compositeTranslogEventListener);
                 this.translogManager = translogManagerRef;
                 this.softDeletesPolicy = newSoftDeletesPolicy();
                 this.combinedDeletionPolicy = new CombinedDeletionPolicy(
@@ -360,6 +352,27 @@ public class InternalEngine extends Engine {
             }
         }
         logger.trace("created new InternalEngine");
+    }
+
+    protected InternalEngineTranslogManager createTranslogManager(
+        String translogUUID,
+        TranslogDeletionPolicy translogDeletionPolicy,
+        CompositeTranslogEventListener translogEventListener
+    ) throws IOException {
+        return new InternalTranslogManager(
+            engineConfig.getTranslogConfig(),
+            engineConfig.getPrimaryTermSupplier(),
+            engineConfig.getGlobalCheckpointSupplier(),
+            translogDeletionPolicy,
+            shardId,
+            readLock,
+            this::getLocalCheckpointTracker,
+            translogUUID,
+            translogEventListener,
+            this::ensureOpen,
+            engineConfig.getTranslogFactory(),
+            engineConfig.getStartedPrimarySupplier()
+        );
     }
 
     private LocalCheckpointTracker createLocalCheckpointTracker(
@@ -2773,7 +2786,7 @@ public class InternalEngine extends Engine {
     /**
      * Gets the commit data from {@link IndexWriter} as a map.
      */
-    private static Map<String, String> commitDataAsMap(final IndexWriter indexWriter) {
+    protected static Map<String, String> commitDataAsMap(final IndexWriter indexWriter) {
         final Map<String, String> commitData = new HashMap<>(8);
         for (Map.Entry<String, String> entry : indexWriter.getLiveCommitData()) {
             commitData.put(entry.getKey(), entry.getValue());

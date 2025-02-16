@@ -4055,11 +4055,6 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             isReadOnlyReplica = false;
         }
 
-        if (isIngestionSource()) {
-            // override globalcheckpoints for ingestion source as checkpoints are not used
-            globalCheckpointSupplier = () -> 0;
-        }
-
         return this.engineConfigFactory.newEngineConfig(
             shardId,
             threadPool,
@@ -4542,8 +4537,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     }
 
     public void sync() throws IOException {
-        verifyNotClosed();
-        getEngine().translogManager().syncTranslog();
+        // skip translog sync for ingestion source as it uses a no-op translog
+        if (isIngestionSource() == false) {
+            verifyNotClosed();
+            getEngine().translogManager().syncTranslog();
+        }
     }
 
     /**
