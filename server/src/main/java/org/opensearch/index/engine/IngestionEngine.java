@@ -55,6 +55,7 @@ import org.opensearch.index.translog.TranslogCorruptedException;
 import org.opensearch.index.translog.TranslogManager;
 import org.opensearch.index.translog.TranslogStats;
 import org.opensearch.indices.pollingingest.DefaultStreamPoller;
+import org.opensearch.indices.pollingingest.IngestionErrorStrategy;
 import org.opensearch.indices.pollingingest.StreamPoller;
 import org.opensearch.search.suggest.completion.CompletionStats;
 import org.opensearch.threadpool.ThreadPool;
@@ -191,7 +192,19 @@ public class IngestionEngine extends Engine {
             resetState = StreamPoller.ResetState.NONE;
         }
 
-        streamPoller = new DefaultStreamPoller(startPointer, persistedPointers, ingestionShardConsumer, this, resetState);
+        IngestionErrorStrategy.ErrorStrategy errorStrategy = IngestionErrorStrategy.ErrorStrategy.valueOf(
+            ingestionSource.getErrorStrategy().toUpperCase(Locale.ROOT)
+        );
+        IngestionErrorStrategy ingestionErrorStratey = IngestionErrorStrategy.create(errorStrategy, ingestionSource.getType());
+
+        streamPoller = new DefaultStreamPoller(
+            startPointer,
+            persistedPointers,
+            ingestionShardConsumer,
+            this,
+            resetState,
+            ingestionErrorStratey
+        );
         streamPoller.start();
     }
 
