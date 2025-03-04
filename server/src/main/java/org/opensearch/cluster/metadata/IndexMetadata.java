@@ -771,13 +771,37 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
         Property.Final
     );
 
+    /**
+     * Defines the error strategy for pull-based ingestion.
+     */
     public static final String SETTING_INGESTION_SOURCE_ERROR_STRATEGY = "index.ingestion_source.error_strategy";
     public static final Setting<IngestionErrorStrategy.ErrorStrategy> INGESTION_SOURCE_ERROR_STRATEGY_SETTING = new Setting<>(
         SETTING_INGESTION_SOURCE_ERROR_STRATEGY,
         IngestionErrorStrategy.ErrorStrategy.DROP.name(),
         IngestionErrorStrategy.ErrorStrategy::parseFromString,
         (errorStrategy) -> {},
-        Property.IndexScope
+        Property.IndexScope,
+        Property.Dynamic
+    );
+
+    /**
+     * Defines the user defined poller state. User is only allowed to set POLLING or PAUSED, indicating whether the poller
+     * is running/paused. StreamPoller.State enum defines more granular states for internal use.
+     */
+    public static final String SETTING_INGESTION_SOURCE_POLLER_STATE = "index.ingestion_source.poller_state";
+    public static final Setting<StreamPoller.State> INGESTION_SOURCE_POLLER_STATE_SETTING = new Setting<>(
+        SETTING_INGESTION_SOURCE_POLLER_STATE,
+        StreamPoller.State.POLLING.name(),
+        StreamPoller.State::parseFromString,
+        pollerState -> {
+            if ((StreamPoller.State.POLLING == pollerState || StreamPoller.State.PAUSED == pollerState) == false) {
+                throw new IllegalArgumentException(
+                    "Invalid value for " + SETTING_INGESTION_SOURCE_POLLER_STATE + " [" + pollerState + "]"
+                );
+            }
+        },
+        Property.IndexScope,
+        Property.Dynamic
     );
 
     public static final Setting.AffixSetting<Object> INGESTION_SOURCE_PARAMS_SETTING = Setting.prefixKeySetting(
@@ -1014,10 +1038,11 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
                 pointerInitResetType,
                 pointerInitResetValue
             );
-
             final IngestionErrorStrategy.ErrorStrategy errorStrategy = INGESTION_SOURCE_ERROR_STRATEGY_SETTING.get(settings);
             final Map<String, Object> ingestionSourceParams = INGESTION_SOURCE_PARAMS_SETTING.getAsMap(settings);
-            return new IngestionSource(ingestionSourceType, pointerInitReset, errorStrategy, ingestionSourceParams);
+            final StreamPoller.State pollerState = INGESTION_SOURCE_POLLER_STATE_SETTING.get(settings);
+
+            return new IngestionSource(ingestionSourceType, pointerInitReset, errorStrategy, pollerState, ingestionSourceParams);
         }
         return null;
     }

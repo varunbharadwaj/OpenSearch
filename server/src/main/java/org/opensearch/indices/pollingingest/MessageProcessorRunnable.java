@@ -46,15 +46,16 @@ import static org.opensearch.index.seqno.SequenceNumbers.UNASSIGNED_SEQ_NO;
  */
 public class MessageProcessorRunnable implements Runnable {
     private static final Logger logger = LogManager.getLogger(MessageProcessorRunnable.class);
+    private static final String ID = "_id";
+    private static final String OP_TYPE = "_op_type";
+    private static final String SOURCE = "_source";
 
     private final BlockingQueue<IngestionShardConsumer.ReadResult<? extends IngestionShardPointer, ? extends Message>> blockingQueue;
     private final MessageProcessor messageProcessor;
     private final CounterMetric stats = new CounterMetric();
-    private IngestionErrorStrategy errorStrategy;
 
-    private static final String ID = "_id";
-    private static final String OP_TYPE = "_op_type";
-    private static final String SOURCE = "_source";
+    private volatile IngestionErrorStrategy errorStrategy;
+    private volatile boolean isWriterPaused;
 
     /**
      * Constructor.
@@ -226,6 +227,18 @@ public class MessageProcessorRunnable implements Runnable {
     @Override
     public void run() {
         while (!(Thread.currentThread().isInterrupted())) {
+            if (isWriterPaused) {
+                try {
+                    // TODO: make sleep time configurable
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt(); // Restore interrupt status
+                } catch (Throwable e) {
+                    logger.error("Error in pausing the ingestion writer thread", e);
+                }
+                continue;
+            }
+
             IngestionShardConsumer.ReadResult<? extends IngestionShardPointer, ? extends Message> result = null;
             try {
                 result = blockingQueue.poll(1000, TimeUnit.MILLISECONDS);
@@ -241,7 +254,7 @@ public class MessageProcessorRunnable implements Runnable {
                 } catch (Exception e) {
                     errorStrategy.handleError(e, IngestionErrorStrategy.ErrorStage.PROCESSING);
                     if (errorStrategy.shouldPauseIngestion(e, IngestionErrorStrategy.ErrorStage.PROCESSING)) {
-                        Thread.currentThread().interrupt();
+                        isWriterPaused = true;
                     }
                 }
             }
@@ -250,5 +263,17 @@ public class MessageProcessorRunnable implements Runnable {
 
     public CounterMetric getStats() {
         return stats;
+    }
+
+    public void setErrorStrategy(IngestionErrorStrategy errorStrategy) {
+        this.errorStrategy = errorStrategy;
+    }
+
+    public void pauseWriter() {
+        isWriterPaused = false;
+    }
+
+    public void resumeWriter() {
+        isWriterPaused = true;
     }
 }

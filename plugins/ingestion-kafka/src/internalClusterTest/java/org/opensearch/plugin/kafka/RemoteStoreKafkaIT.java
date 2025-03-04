@@ -117,6 +117,68 @@ public class RemoteStoreKafkaIT extends KafkaIngestionBaseIT {
         waitForSearchableDocs(6, Arrays.asList(nodeB, nodeC));
     }
 
+    public void testIngestionPauseAndResume() throws Exception {
+        // Step 1: Setup index and nodes
+
+        internalCluster().startClusterManagerOnlyNode();
+        final String nodeA = internalCluster().startDataOnlyNode();
+        createIndex(
+            indexName,
+            Settings.builder()
+                .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+                .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 1)
+                .put("ingestion_source.type", "kafka")
+                .put("ingestion_source.pointer.init.reset", "earliest")
+                .put("ingestion_source.param.topic", topicName)
+                .put("ingestion_source.param.bootstrap_servers", kafka.getBootstrapServers())
+                .put("index.replication.type", "SEGMENT")
+                .build(),
+            mapping
+        );
+        ensureYellowAndNoInitializingShards(indexName);
+        final String nodeB = internalCluster().startDataOnlyNode();
+        ensureGreen(indexName);
+        assertTrue(nodeA.equals(primaryNodeName(indexName)));
+        assertTrue(nodeB.equals(replicaNodeName(indexName)));
+
+        produceData("1", "name1", "24");
+        produceData("2", "name2", "20");
+        refresh(indexName);
+        waitForSearchableDocs(2, Arrays.asList(nodeA, nodeB));
+
+        // Step 2: Pause ingestion
+
+        pauseIngestion(indexName);
+        waitForPollerState(indexName, "paused");
+        assertEquals("paused", getPollerState(indexName));
+
+        // Step 3: Produce updates and refresh
+        produceData("3", "name3", "30");
+        produceData("4", "name4", "31");
+        refresh(indexName);
+
+        // Step 4: Bring down current primary shard, promote replica and add a third node
+
+        internalCluster().stopRandomNode(InternalTestCluster.nameFilter(nodeA));
+        ensureYellowAndNoInitializingShards(indexName);
+        assertTrue(nodeB.equals(primaryNodeName(indexName)));
+        final String nodeC = internalCluster().startDataOnlyNode();
+        client().admin().cluster().prepareReroute().add(new AllocateReplicaAllocationCommand(indexName, 0, nodeC)).get();
+        ensureGreen(indexName);
+        assertTrue(nodeC.equals(replicaNodeName(indexName)));
+
+        // step 5: ensure poller state is persisted and still paused on new primary shard
+
+        waitForSearchableDocs(2, Arrays.asList(nodeB, nodeC));
+        assertEquals("paused", getPollerState(indexName));
+
+        // step 6: resume ingestion and validate new documents are indexed
+
+        resumeIngestion(indexName);
+        assertEquals("polling", getPollerState(indexName));
+        waitForSearchableDocs(4, Arrays.asList(nodeB, nodeC));
+    }
+
     private void verifyRemoteStoreEnabled(String node) {
         GetSettingsResponse settingsResponse = client(node).admin().indices().prepareGetSettings(indexName).get();
         String remoteStoreEnabled = settingsResponse.getIndexToSettings().get(indexName).get("index.remote_store.enabled");

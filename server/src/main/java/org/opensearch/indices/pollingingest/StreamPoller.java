@@ -12,6 +12,7 @@ import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.index.IngestionShardPointer;
 
 import java.io.Closeable;
+import java.util.Locale;
 
 /**
  * A poller for reading messages from an ingestion shard. This is used in the ingestion engine.
@@ -53,14 +54,34 @@ public interface StreamPoller extends Closeable {
     PollingIngestStats getStats();
 
     /**
+     * Update the error handling strategy in the ingestion poller
+     */
+    void updateErrorStrategy(IngestionErrorStrategy errorStrategy);
+
+    /**
+     * Updates the forced reset state of the poller. Resume ingestion from provided reset point irrespective of current
+     * progress.
+     */
+    void updateForcedResetState(ResetState resetState, String resetValue);
+
+    /**
      * a state to indicate the current state of the poller
      */
+    @ExperimentalApi
     enum State {
         NONE,
         CLOSED,
         PAUSED,
         POLLING,
-        PROCESSING,
+        PROCESSING;
+
+        public static State parseFromString(String state) {
+            try {
+                return State.valueOf(state.toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("Invalid ingestion poller state: " + state, e);
+            }
+        }
     }
 
     /**

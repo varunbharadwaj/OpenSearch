@@ -23,18 +23,21 @@ public class IngestionSource {
     private String type;
     private PointerInitReset pointerInitReset;
     private IngestionErrorStrategy.ErrorStrategy errorStrategy;
+    private StreamPoller.State pollerState;
     private Map<String, Object> params;
 
     public IngestionSource(
         String type,
         PointerInitReset pointerInitReset,
         IngestionErrorStrategy.ErrorStrategy errorStrategy,
+        StreamPoller.State pollerState,
         Map<String, Object> params
     ) {
         this.type = type;
         this.pointerInitReset = pointerInitReset;
         this.params = params;
         this.errorStrategy = errorStrategy;
+        this.pollerState = pollerState;
     }
 
     public String getType() {
@@ -49,6 +52,10 @@ public class IngestionSource {
         return errorStrategy;
     }
 
+    public StreamPoller.State getPollerState() {
+        return pollerState;
+    }
+
     public Map<String, Object> params() {
         return params;
     }
@@ -61,12 +68,13 @@ public class IngestionSource {
         return Objects.equals(type, ingestionSource.type)
             && Objects.equals(pointerInitReset, ingestionSource.pointerInitReset)
             && Objects.equals(errorStrategy, ingestionSource.errorStrategy)
+            && Objects.equals(pollerState, ingestionSource.pollerState)
             && Objects.equals(params, ingestionSource.params);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(type, pointerInitReset, params, errorStrategy);
+        return Objects.hash(type, pointerInitReset, params, errorStrategy, pollerState);
     }
 
     @Override
@@ -80,6 +88,9 @@ public class IngestionSource {
             + '\''
             + ",error_strategy='"
             + errorStrategy
+            + '\''
+            + ",poller_state='"
+            + pollerState
             + '\''
             + ", params="
             + params

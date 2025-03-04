@@ -52,9 +52,6 @@ public class DefaultStreamPoller implements StreamPoller {
     // start of the batch, inclusive
     private IngestionShardPointer batchStartPointer;
 
-    private ResetState resetState;
-    private final String resetValue;
-
     private Set<IngestionShardPointer> persistedPointers;
 
     private BlockingQueue<IngestionShardConsumer.ReadResult<? extends IngestionShardPointer, ? extends Message>> blockingQueue;
@@ -67,7 +64,12 @@ public class DefaultStreamPoller implements StreamPoller {
     @Nullable
     private IngestionShardPointer maxPersistedPointer;
 
-    private IngestionErrorStrategy errorStrategy;
+    // todo: check if volatile needs to be replaced with explicit memory barrier in dynamic settings handler to make updates visible depending on perf metrics
+    private volatile IngestionErrorStrategy errorStrategy;
+    private volatile ResetState resetState;
+    private volatile String resetValue;
+    private volatile ResetState forcedResetState;
+    private volatile String forcedResetValue;
 
     public DefaultStreamPoller(
         IngestionShardPointer startPointer,
@@ -268,6 +270,7 @@ public class DefaultStreamPoller implements StreamPoller {
             throw new RuntimeException("consumer is closed!");
         }
         paused = true;
+        processorRunnable.pauseWriter();
     }
 
     @Override
@@ -275,7 +278,15 @@ public class DefaultStreamPoller implements StreamPoller {
         if (closed) {
             throw new RuntimeException("consumer is closed!");
         }
+
+        // update poller reset state in case index settings has been updated
+        if (forcedResetState != ResetState.NONE && forcedResetValue != null && !forcedResetValue.isBlank()) {
+            resetState = forcedResetState;
+            resetValue = forcedResetValue;
+        }
+
         paused = false;
+        processorRunnable.resumeWriter();
     }
 
     @Override
@@ -327,6 +338,22 @@ public class DefaultStreamPoller implements StreamPoller {
         builder.setTotalPolledCount(totalPolledCount.count());
         builder.setTotalProcessedCount(processorRunnable.getStats().count());
         return builder.build();
+    }
+
+    @Override
+    public void updateErrorStrategy(IngestionErrorStrategy errorStrategy) {
+        this.errorStrategy = errorStrategy;
+        processorRunnable.setErrorStrategy(errorStrategy);
+    }
+
+    /**
+     * Records updated forcedResetState and corresponding value. The consumer will be reset to this point irrespective of
+     * current indexing progress. This will only be effective when the poller is resumed.
+     */
+    @Override
+    public void updateForcedResetState(ResetState resetState, String resetValue) {
+        forcedResetState = resetState;
+        forcedResetValue = resetValue;
     }
 
     public State getState() {

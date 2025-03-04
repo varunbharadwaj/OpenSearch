@@ -14,7 +14,9 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.opensearch.action.admin.indices.settings.get.GetSettingsResponse;
 import org.opensearch.action.search.SearchResponse;
+import org.opensearch.common.settings.Settings;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.test.OpenSearchIntegTestCase;
 import org.junit.After;
@@ -97,15 +99,55 @@ public class KafkaIngestionBaseIT extends OpenSearchIntegTestCase {
         producer.send(new ProducerRecord<>(topicName, null, timestamp, "null", payload));
     }
 
+    protected void pauseIngestion(String indexName) {
+        client()
+            .admin()
+            .indices()
+            .prepareUpdateSettings(indexName)
+            .setSettings(Settings.builder().put("ingestion_source.poller_state", "paused"))
+            .get();
+    }
+
+    protected void resumeIngestion(String indexName) {
+        client()
+            .admin()
+            .indices()
+            .prepareUpdateSettings(indexName)
+            .setSettings(Settings.builder().put("ingestion_source.poller_state", "polling"))
+            .get();
+    }
+
     protected void waitForSearchableDocs(long docCount, List<String> nodes) throws Exception {
         assertBusy(() -> {
             for (String node : nodes) {
-                final SearchResponse response = client(node).prepareSearch(indexName).setSize(0).setPreference("_only_local").get();
-                final long hits = response.getHits().getTotalHits().value();
+                final long hits = getTotalDocuments(node, indexName);
                 if (hits < docCount) {
                     fail("Expected search hits on node: " + node + " to be at least " + docCount + " but was: " + hits);
                 }
             }
         }, 1, TimeUnit.MINUTES);
+    }
+
+    protected long getTotalDocuments(String node, String indexName) {
+        final SearchResponse response = client(node).prepareSearch(indexName).setSize(0).setPreference("_only_local").get();
+        return response.getHits().getTotalHits().value();
+    }
+
+    protected void waitForPollerState(String indexName, String expectedPollerState) throws Exception {
+        assertBusy(() -> {
+            String currentPollerState = getPollerState(indexName);
+            if (currentPollerState.equalsIgnoreCase(expectedPollerState) == false) {
+                fail("Ingestion not paused, but expected to be paused");
+            }
+        }, 1, TimeUnit.MINUTES);
+    }
+
+    protected String getPollerState(String indexName) {
+        return client()
+            .admin()
+            .indices()
+            .prepareGetSettings(indexName)
+            .get()
+            .getSetting(indexName, "index.ingestion_source.poller_state");
     }
 }
