@@ -126,6 +126,7 @@ import org.opensearch.index.engine.EngineConfig;
 import org.opensearch.index.engine.EngineConfigFactory;
 import org.opensearch.index.engine.EngineException;
 import org.opensearch.index.engine.EngineFactory;
+import org.opensearch.index.engine.IngestionEngine;
 import org.opensearch.index.engine.NRTReplicationEngine;
 import org.opensearch.index.engine.ReadOnlyEngine;
 import org.opensearch.index.engine.RefreshFailedEngineException;
@@ -5436,5 +5437,24 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             return shouldSeed ? REMOTE_MIGRATING_UNSEEDED : REMOTE_MIGRATING_SEEDED;
         }
         return ShardMigrationState.DOCREP_NON_MIGRATING;
+    }
+
+    public void updateShardIngestionState(IndexMetadata indexMetadata) {
+        if (indexMetadata.useIngestionSource() == false) {
+            return;
+        }
+
+        synchronized (engineMutex) {
+            if (getEngineOrNull() instanceof IngestionEngine == false) {
+                return;
+            }
+
+            IngestionEngine ingestionEngine = (IngestionEngine) getEngineOrNull();
+            if (indexMetadata.isIngestionPaused()) {
+                ingestionEngine.pauseIngestion();
+            } else {
+                ingestionEngine.resumeIngestion();
+            }
+        }
     }
 }

@@ -9,6 +9,7 @@
 package org.opensearch.plugin.kafka;
 
 import org.opensearch.action.admin.indices.settings.get.GetSettingsResponse;
+import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngestionResponse;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.routing.allocation.command.AllocateReplicaAllocationCommand;
@@ -153,6 +154,20 @@ public class RemoteStoreKafkaIT extends KafkaIngestionBaseIT {
             .get();
         waitForState(() -> "drop".equalsIgnoreCase(getSettings(indexName, "index.ingestion_source.error_strategy")));
         waitForSearchableDocs(2, Arrays.asList(node));
+    }
+
+    public void testPauseIngestion() throws Exception {
+        produceData("1", "name1", "24");
+        produceData("2", "name2", "20");
+        internalCluster().startClusterManagerOnlyNode();
+        final String nodeA = internalCluster().startDataOnlyNode();
+        final String nodeB = internalCluster().startDataOnlyNode();
+
+        createIndexWithDefaultSettings(1, 1);
+        ensureGreen(indexName);
+        waitForSearchableDocs(2, Arrays.asList(nodeA, nodeB));
+
+        PauseIngestionResponse response = client().admin().indices().pauseIngestion(Requests.pauseIngestionRequest(indexName)).get();
     }
 
     private void verifyRemoteStoreEnabled(String node) {

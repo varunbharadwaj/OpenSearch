@@ -198,6 +198,8 @@ import org.opensearch.action.admin.indices.shrink.ResizeAction;
 import org.opensearch.action.admin.indices.shrink.TransportResizeAction;
 import org.opensearch.action.admin.indices.stats.IndicesStatsAction;
 import org.opensearch.action.admin.indices.stats.TransportIndicesStatsAction;
+import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngestionAction;
+import org.opensearch.action.admin.indices.streamingingestion.pause.TransportPauseIngestionAction;
 import org.opensearch.action.admin.indices.template.delete.DeleteComponentTemplateAction;
 import org.opensearch.action.admin.indices.template.delete.DeleteComposableIndexTemplateAction;
 import org.opensearch.action.admin.indices.template.delete.DeleteIndexTemplateAction;
@@ -805,6 +807,9 @@ public class ActionModule extends AbstractModule {
         actions.register(PutSearchPipelineAction.INSTANCE, PutSearchPipelineTransportAction.class);
         actions.register(GetSearchPipelineAction.INSTANCE, GetSearchPipelineTransportAction.class);
         actions.register(DeleteSearchPipelineAction.INSTANCE, DeleteSearchPipelineTransportAction.class);
+
+        // Pull-based ingestion actions
+        actions.register(PauseIngestionAction.INSTANCE, TransportPauseIngestionAction.class);
 
         return unmodifiableMap(actions.getRegistry());
     }

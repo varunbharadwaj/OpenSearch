@@ -46,6 +46,11 @@ public interface StreamPoller extends Closeable {
     boolean isClosed();
 
     /**
+     * Returns true is the poller has started.
+     */
+    boolean hasStarted();
+
+    /**
      * get the pointer to the start of the current batch of messages.
      */
     IngestionShardPointer getBatchStartPointer();

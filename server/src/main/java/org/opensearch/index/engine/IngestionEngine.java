@@ -104,7 +104,6 @@ public class IngestionEngine extends InternalEngine {
             ingestionSource.getErrorStrategy(),
             ingestionSource.getType()
         );
-
         streamPoller = new DefaultStreamPoller(
             startPointer,
             persistedPointers,
@@ -114,7 +113,9 @@ public class IngestionEngine extends InternalEngine {
             resetValue,
             ingestionErrorStrategy
         );
-        streamPoller.start();
+        if (indexMetadata.isIngestionPaused() == false) {
+            streamPoller.start();
+        }
     }
 
     protected Set<IngestionShardPointer> fetchPersistedOffsets(DirectoryReader directoryReader, IngestionShardPointer batchStart)
@@ -309,6 +310,17 @@ public class IngestionEngine extends InternalEngine {
     @Override
     public PollingIngestStats pollingIngestStats() {
         return streamPoller.getStats();
+    }
+
+    public void pauseIngestion() {
+        streamPoller.pause();
+    }
+
+    public void resumeIngestion() {
+        if (streamPoller.hasStarted() == false) {
+            streamPoller.start();
+        }
+        streamPoller.resume();
     }
 
     private void registerDynamicIndexSettingsHandlers() {

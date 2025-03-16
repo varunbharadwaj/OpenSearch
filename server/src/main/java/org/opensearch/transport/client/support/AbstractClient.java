@@ -293,6 +293,9 @@ import org.opensearch.action.admin.indices.stats.IndicesStatsAction;
 import org.opensearch.action.admin.indices.stats.IndicesStatsRequest;
 import org.opensearch.action.admin.indices.stats.IndicesStatsRequestBuilder;
 import org.opensearch.action.admin.indices.stats.IndicesStatsResponse;
+import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngestionAction;
+import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngestionRequest;
+import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngestionResponse;
 import org.opensearch.action.admin.indices.template.delete.DeleteIndexTemplateAction;
 import org.opensearch.action.admin.indices.template.delete.DeleteIndexTemplateRequest;
 import org.opensearch.action.admin.indices.template.delete.DeleteIndexTemplateRequestBuilder;
@@ -2144,6 +2147,16 @@ public abstract class AbstractClient implements Client {
         /** Create a view */
         public ActionFuture<GetViewAction.Response> updateView(CreateViewAction.Request request) {
             return execute(UpdateViewAction.INSTANCE, request);
+        }
+
+        @Override
+        public ActionFuture<PauseIngestionResponse> pauseIngestion(final PauseIngestionRequest request) {
+            return execute(PauseIngestionAction.INSTANCE, request);
+        }
+
+        @Override
+        public void pauseIngestion(final PauseIngestionRequest request, final ActionListener<PauseIngestionResponse> listener) {
+            execute(PauseIngestionAction.INSTANCE, request, listener);
         }
     }
 

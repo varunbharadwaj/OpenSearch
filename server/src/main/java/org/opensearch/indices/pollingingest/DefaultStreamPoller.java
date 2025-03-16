@@ -129,6 +129,11 @@ public class DefaultStreamPoller implements StreamPoller {
         if (closed) {
             throw new RuntimeException("poller is closed!");
         }
+
+        if (started) {
+            throw new RuntimeException("poller is already running");
+        }
+
         started = true;
         consumerThread.submit(this::startPoll);
         processorThread.submit(processorRunnable);
@@ -341,5 +346,10 @@ public class DefaultStreamPoller implements StreamPoller {
     public void updateErrorStrategy(IngestionErrorStrategy errorStrategy) {
         this.errorStrategy = errorStrategy;
         processorRunnable.setErrorStrategy(errorStrategy);
+    }
+
+    @Override
+    public boolean hasStarted() {
+        return started;
     }
 }
