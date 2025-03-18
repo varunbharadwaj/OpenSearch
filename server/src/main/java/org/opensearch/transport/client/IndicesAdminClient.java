@@ -111,6 +111,8 @@ import org.opensearch.action.admin.indices.stats.IndicesStatsRequestBuilder;
 import org.opensearch.action.admin.indices.stats.IndicesStatsResponse;
 import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngestionRequest;
 import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngestionResponse;
+import org.opensearch.action.admin.indices.streamingingestion.resume.ResumeIngestionRequest;
+import org.opensearch.action.admin.indices.streamingingestion.resume.ResumeIngestionResponse;
 import org.opensearch.action.admin.indices.template.delete.DeleteIndexTemplateRequest;
 import org.opensearch.action.admin.indices.template.delete.DeleteIndexTemplateRequestBuilder;
 import org.opensearch.action.admin.indices.template.get.GetIndexTemplatesRequest;
@@ -871,4 +873,8 @@ public interface IndicesAdminClient extends OpenSearchClient {
     ActionFuture<PauseIngestionResponse> pauseIngestion(PauseIngestionRequest request);
 
     void pauseIngestion(PauseIngestionRequest request, ActionListener<PauseIngestionResponse> listener);
+
+    ActionFuture<ResumeIngestionResponse> resumeIngestion(ResumeIngestionRequest request);
+
+    void resumeIngestion(ResumeIngestionRequest request, ActionListener<ResumeIngestionResponse> listener);
 }

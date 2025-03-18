@@ -29,21 +29,23 @@
  * GitHub history for details.
  */
 
-package org.opensearch.action.admin.indices.streamingingestion.pause;
+package org.opensearch.action.admin.indices.streamingingestion.resume;
 
-import org.opensearch.action.support.ActiveShardCount;
 import org.opensearch.cluster.ack.IndicesClusterStateUpdateRequest;
+
+import java.util.List;
 
 /**
  * Cluster state update request that allows to close one or more indices
  *
  * @opensearch.internal
  */
-public class PauseIngestionClusterStateUpdateRequest extends IndicesClusterStateUpdateRequest<PauseIngestionClusterStateUpdateRequest> {
+public class ResumeIngestionClusterStateUpdateRequest extends IndicesClusterStateUpdateRequest<ResumeIngestionClusterStateUpdateRequest> {
 
     private long taskId;
+    private List<ResumeIngestionRequest.ResetSettings> resetSettingsList;
 
-    public PauseIngestionClusterStateUpdateRequest(final long taskId) {
+    public ResumeIngestionClusterStateUpdateRequest(final long taskId) {
         this.taskId = taskId;
     }
 
@@ -51,8 +53,14 @@ public class PauseIngestionClusterStateUpdateRequest extends IndicesClusterState
         return taskId;
     }
 
-    public PauseIngestionClusterStateUpdateRequest taskId(final long taskId) {
+    public ResumeIngestionClusterStateUpdateRequest taskId(final long taskId) {
         this.taskId = taskId;
         return this;
     }
+
+    public ResumeIngestionClusterStateUpdateRequest resetSettings(final List<ResumeIngestionRequest.ResetSettings> resetSettingsList) {
+        this.resetSettingsList = resetSettingsList;
+        return this;
+    }
+
 }

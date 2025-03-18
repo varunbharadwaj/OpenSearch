@@ -10,6 +10,7 @@ package org.opensearch.plugin.kafka;
 
 import org.opensearch.action.admin.indices.settings.get.GetSettingsResponse;
 import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngestionResponse;
+import org.opensearch.action.admin.indices.streamingingestion.resume.ResumeIngestionResponse;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.routing.allocation.command.AllocateReplicaAllocationCommand;
@@ -156,7 +157,7 @@ public class RemoteStoreKafkaIT extends KafkaIngestionBaseIT {
         waitForSearchableDocs(2, Arrays.asList(node));
     }
 
-    public void testPauseIngestion() throws Exception {
+    public void testPauseResumeIngestion() throws Exception {
         produceData("1", "name1", "24");
         produceData("2", "name2", "20");
         internalCluster().startClusterManagerOnlyNode();
@@ -167,7 +168,25 @@ public class RemoteStoreKafkaIT extends KafkaIngestionBaseIT {
         ensureGreen(indexName);
         waitForSearchableDocs(2, Arrays.asList(nodeA, nodeB));
 
-        PauseIngestionResponse response = client().admin().indices().pauseIngestion(Requests.pauseIngestionRequest(indexName)).get();
+        PauseIngestionResponse pauseResponse = client().admin().indices().pauseIngestion(Requests.pauseIngestionRequest(indexName)).get();
+        assertTrue(pauseResponse.isAcknowledged());
+        assertTrue(pauseResponse.isShardsAcknowledged());
+
+        produceData("3", "name3", "30");
+        produceData("4", "name4", "31");
+        internalCluster().stopRandomNode(InternalTestCluster.nameFilter(nodeA));
+        ensureYellowAndNoInitializingShards(indexName);
+        assertTrue(nodeB.equals(primaryNodeName(indexName)));
+
+        final String nodeC = internalCluster().startDataOnlyNode();
+        client().admin().cluster().prepareReroute().add(new AllocateReplicaAllocationCommand(indexName, 0, nodeC)).get();
+        ensureGreen(indexName);
+        assertTrue(nodeC.equals(replicaNodeName(indexName)));
+        assertEquals(2, getSearchableDocCount(nodeB));
+
+        ResumeIngestionResponse resumeResponse = client().admin().indices().resumeIngestion(Requests.resumeIngestionRequest(indexName)).get();
+        assertTrue(resumeResponse.isAcknowledged());
+        assertTrue(resumeResponse.isShardsAcknowledged());
     }
 
     private void verifyRemoteStoreEnabled(String node) {

@@ -112,6 +112,11 @@ public class KafkaIngestionBaseIT extends OpenSearchIntegTestCase {
         }, 1, TimeUnit.MINUTES);
     }
 
+    protected long getSearchableDocCount(String node) throws Exception {
+        final SearchResponse response = client(node).prepareSearch(indexName).setSize(0).setPreference("_only_local").get();
+        return response.getHits().getTotalHits().value();
+    }
+
     protected void waitForState(Callable<Boolean> checkState) throws Exception {
         assertBusy(() -> {
             if (checkState.call() == false) {

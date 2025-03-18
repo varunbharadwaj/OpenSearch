@@ -29,21 +29,15 @@
  * GitHub history for details.
  */
 
-package org.opensearch.action.admin.indices.streamingingestion.pause;
+package org.opensearch.action.admin.indices.streamingingestion.resume;
 
-import org.opensearch.OpenSearchException;
-import org.opensearch.action.admin.indices.tiering.HotToWarmTieringResponse;
 import org.opensearch.action.support.clustermanager.ShardsAcknowledgedResponse;
-import org.opensearch.common.Nullable;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.annotation.PublicApi;
-import org.opensearch.core.action.support.DefaultShardOperationFailedException;
 import org.opensearch.core.common.Strings;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
 import org.opensearch.core.common.io.stream.Writeable;
-import org.opensearch.core.common.util.CollectionUtils;
-import org.opensearch.core.index.Index;
 import org.opensearch.core.xcontent.MediaTypeRegistry;
 import org.opensearch.core.xcontent.ToXContentFragment;
 import org.opensearch.core.xcontent.XContentBuilder;
@@ -60,16 +54,16 @@ import static java.util.Collections.unmodifiableList;
  * @opensearch.api
  */
 @PublicApi(since = "3.0.0")
-public class PauseIngestionResponse extends ShardsAcknowledgedResponse {
+public class ResumeIngestionResponse extends ShardsAcknowledgedResponse {
 
     private final List<IndexResult> indices;
 
-    PauseIngestionResponse(StreamInput in) throws IOException {
+    ResumeIngestionResponse(StreamInput in) throws IOException {
         super(in, true);
         indices = unmodifiableList(in.readList(IndexResult::new));
     }
 
-    public PauseIngestionResponse(final boolean acknowledged, final boolean shardsAcknowledged, final List<IndexResult> indices) {
+    public ResumeIngestionResponse(final boolean acknowledged, final boolean shardsAcknowledged, final List<IndexResult> indices) {
         super(acknowledged, shardsAcknowledged);
         this.indices = unmodifiableList(Objects.requireNonNull(indices));
     }
@@ -145,7 +139,7 @@ public class PauseIngestionResponse extends ShardsAcknowledgedResponse {
         public boolean equals(Object o) {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
-            PauseIngestionResponse.IndexResult that = (PauseIngestionResponse.IndexResult) o;
+            ResumeIngestionResponse.IndexResult that = (ResumeIngestionResponse.IndexResult) o;
             return Objects.equals(index, that.index) && Objects.equals(errorMessage, that.errorMessage);
         }
 

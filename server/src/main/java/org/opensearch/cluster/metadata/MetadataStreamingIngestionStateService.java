@@ -12,6 +12,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngestionClusterStateUpdateRequest;
 import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngestionResponse;
+import org.opensearch.action.admin.indices.streamingingestion.resume.ResumeIngestionClusterStateUpdateRequest;
+import org.opensearch.action.admin.indices.streamingingestion.resume.ResumeIngestionResponse;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.ClusterStateUpdateTask;
 import org.opensearch.cluster.block.ClusterBlock;
@@ -72,6 +74,43 @@ public class MetadataStreamingIngestionStateService {
                     // todo: verify pollers have been paused on all the requested index shards
                     boolean shardsAcked = oldState != newState;
                     listener.onResponse(new PauseIngestionResponse(true, shardsAcked, Collections.emptyList()));
+                }
+
+                @Override
+                public void onFailure(final String source, final Exception e) {
+                    listener.onFailure(e);
+                }
+
+                @Override
+                public TimeValue timeout() {
+                    return request.clusterManagerNodeTimeout();
+                }
+            }
+        );
+    }
+
+    public void resumeIngestion(final ResumeIngestionClusterStateUpdateRequest request, final ActionListener<ResumeIngestionResponse> listener) {
+        final Index[] concreteIndices = request.indices();
+        if (concreteIndices == null || concreteIndices.length == 0) {
+            throw new IllegalArgumentException("Index name is required");
+        }
+
+        clusterService.submitStateUpdateTask(
+            "resume-ingestion " + Arrays.toString(concreteIndices),
+            new ClusterStateUpdateTask(Priority.URGENT) {
+
+                private final Map<Index, ClusterBlock> blockedIndices = new HashMap<>();
+
+                @Override
+                public ClusterState execute(final ClusterState currentState) {
+                    return updateIngestionPausedState(concreteIndices, currentState, false);
+                }
+
+                @Override
+                public void clusterStateProcessed(final String source, final ClusterState oldState, final ClusterState newState) {
+                    // todo: verify pollers have been paused on all the requested index shards
+                    boolean shardsAcked = oldState != newState;
+                    listener.onResponse(new ResumeIngestionResponse(true, shardsAcked, Collections.emptyList()));
                 }
 
                 @Override
