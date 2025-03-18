@@ -14,6 +14,9 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngestionResponse;
+import org.opensearch.action.admin.indices.streamingingestion.resume.ResumeIngestionResponse;
+import org.opensearch.action.admin.indices.streamingingestion.state.GetIngestionStateResponse;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.settings.Settings;
@@ -28,8 +31,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Properties;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
+import org.opensearch.transport.client.Requests;
 import org.testcontainers.containers.KafkaContainer;
 import org.testcontainers.utility.DockerImageName;
 
@@ -127,6 +132,18 @@ public class KafkaIngestionBaseIT extends OpenSearchIntegTestCase {
 
     protected String getSettings(String indexName, String setting) {
         return client().admin().indices().prepareGetSettings(indexName).get().getSetting(indexName, setting);
+    }
+
+    protected GetIngestionStateResponse getIngestionState(String indexName) throws ExecutionException, InterruptedException {
+        return client().admin().indices().getIngestionState(Requests.getIngestionStateRequest(indexName)).get();
+    }
+
+    protected PauseIngestionResponse pauseIngestion(String indexName) throws ExecutionException, InterruptedException {
+        return client().admin().indices().pauseIngestion(Requests.pauseIngestionRequest(indexName)).get();
+    }
+
+    protected ResumeIngestionResponse resumeIngestion(String indexName) throws ExecutionException, InterruptedException {
+        return client().admin().indices().resumeIngestion(Requests.resumeIngestionRequest(indexName)).get();
     }
 
     protected void createIndexWithDefaultSettings(int numShards, int numReplicas) {

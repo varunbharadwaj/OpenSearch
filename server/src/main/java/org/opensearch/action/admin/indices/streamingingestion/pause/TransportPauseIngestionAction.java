@@ -86,15 +86,6 @@ public class TransportPauseIngestionAction extends TransportClusterManagerNodeAc
 
     @Override
     protected void doExecute(Task task, PauseIngestionRequest request, ActionListener<PauseIngestionResponse> listener) {
-//        destructiveOperations.failDestructive(request.indices());
-//        if (closeIndexEnabled == false) {
-//            throw new IllegalStateException(
-//                "closing indices is disabled - set ["
-//                    + CLUSTER_INDICES_CLOSE_ENABLE_SETTING.getKey()
-//                    + ": true] to enable it. NOTE: closed indices still consume a significant amount of diskspace"
-//            );
-//        }
-//        super.doExecute(task, request, listener);
         super.doExecute(task, request, listener);
     }
 
@@ -122,18 +113,16 @@ public class TransportPauseIngestionAction extends TransportClusterManagerNodeAc
     ) throws Exception {
         final Index[] concreteIndices = indexNameExpressionResolver.concreteIndices(state, request);
         if (concreteIndices == null || concreteIndices.length == 0) {
-            listener.onResponse(new PauseIngestionResponse(true, false, Collections.emptyList()));
+            listener.onResponse(new PauseIngestionResponse(true, Collections.emptyList()));
             return;
         }
 
-        final PauseIngestionClusterStateUpdateRequest pauseRequest = new PauseIngestionClusterStateUpdateRequest(task.getId()).ackTimeout(
-            request.timeout()
-        )
+        final PauseIngestionClusterStateUpdateRequest pauseRequest = new PauseIngestionClusterStateUpdateRequest(task.getId()).ackTimeout(request.timeout())
             .clusterManagerNodeTimeout(request.clusterManagerNodeTimeout())
             .indices(concreteIndices);
 
         ingestionStateService.pauseIngestion(pauseRequest, ActionListener.delegateResponse(listener, (delegatedListener, t) -> {
-            logger.debug(() -> new ParameterizedMessage("failed to pause indices [{}]", (Object) concreteIndices), t);
+            logger.debug(() -> new ParameterizedMessage("failed to pause ingestion on indices [{}]", (Object) concreteIndices), t);
             delegatedListener.onFailure(t);
         }));
     }

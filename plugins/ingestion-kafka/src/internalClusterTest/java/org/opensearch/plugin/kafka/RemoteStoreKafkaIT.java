@@ -11,6 +11,7 @@ package org.opensearch.plugin.kafka;
 import org.opensearch.action.admin.indices.settings.get.GetSettingsResponse;
 import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngestionResponse;
 import org.opensearch.action.admin.indices.streamingingestion.resume.ResumeIngestionResponse;
+import org.opensearch.action.admin.indices.streamingingestion.state.GetIngestionStateResponse;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.routing.allocation.command.AllocateReplicaAllocationCommand;
@@ -157,7 +158,8 @@ public class RemoteStoreKafkaIT extends KafkaIngestionBaseIT {
         waitForSearchableDocs(2, Arrays.asList(node));
     }
 
-    public void testPauseResumeIngestion() throws Exception {
+    public void testPauseAndResumeIngestion() throws Exception {
+        // setup nodes and index
         produceData("1", "name1", "24");
         produceData("2", "name2", "20");
         internalCluster().startClusterManagerOnlyNode();
@@ -168,10 +170,15 @@ public class RemoteStoreKafkaIT extends KafkaIngestionBaseIT {
         ensureGreen(indexName);
         waitForSearchableDocs(2, Arrays.asList(nodeA, nodeB));
 
-        PauseIngestionResponse pauseResponse = client().admin().indices().pauseIngestion(Requests.pauseIngestionRequest(indexName)).get();
+        // pause ingestion
+        PauseIngestionResponse pauseResponse = pauseIngestion(indexName);
         assertTrue(pauseResponse.isAcknowledged());
-        assertTrue(pauseResponse.isShardsAcknowledged());
+        waitForState(() -> {
+            GetIngestionStateResponse ingestionState = getIngestionState(indexName);
+            return Arrays.stream(ingestionState.getShardStates()).allMatch(state -> state.getPollerState().equalsIgnoreCase("paused"));
+        });
 
+        // verify ingestion state is persisted
         produceData("3", "name3", "30");
         produceData("4", "name4", "31");
         internalCluster().stopRandomNode(InternalTestCluster.nameFilter(nodeA));
@@ -183,10 +190,24 @@ public class RemoteStoreKafkaIT extends KafkaIngestionBaseIT {
         ensureGreen(indexName);
         assertTrue(nodeC.equals(replicaNodeName(indexName)));
         assertEquals(2, getSearchableDocCount(nodeB));
+        waitForState(() -> {
+            GetIngestionStateResponse ingestionState = getIngestionState(indexName);
+            return Arrays.stream(ingestionState.getShardStates()).allMatch(state -> state.getPollerState().equalsIgnoreCase("paused"));
+        });
 
-        ResumeIngestionResponse resumeResponse = client().admin().indices().resumeIngestion(Requests.resumeIngestionRequest(indexName)).get();
+        // resume ingestion
+        ResumeIngestionResponse resumeResponse = resumeIngestion(indexName);
         assertTrue(resumeResponse.isAcknowledged());
-        assertTrue(resumeResponse.isShardsAcknowledged());
+        waitForState(() -> {
+            GetIngestionStateResponse ingestionState = getIngestionState(indexName);
+            return Arrays.stream(ingestionState.getShardStates()).allMatch(state -> state.getPollerState().equalsIgnoreCase("polling") || state.getPollerState().equalsIgnoreCase("processing"));
+        });
+
+        waitForSearchableDocs(4, Arrays.asList(nodeB, nodeC));
+
+        GetIngestionStateResponse ingestionState = getIngestionState(indexName);
+        PauseIngestionResponse x = client().admin().indices().pauseIngestion(Requests.pauseIngestionRequest("testindex")).get();
+        waitForSearchableDocs(4, Arrays.asList(nodeB, nodeC));
     }
 
     private void verifyRemoteStoreEnabled(String node) {

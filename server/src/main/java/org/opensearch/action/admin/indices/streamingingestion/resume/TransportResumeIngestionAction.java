@@ -123,7 +123,7 @@ public class TransportResumeIngestionAction extends TransportClusterManagerNodeA
     ) throws Exception {
         final Index[] concreteIndices = indexNameExpressionResolver.concreteIndices(state, request);
         if (concreteIndices == null || concreteIndices.length == 0) {
-            listener.onResponse(new ResumeIngestionResponse(true, false, Collections.emptyList()));
+            listener.onResponse(new ResumeIngestionResponse(true, Collections.emptyList()));
             return;
         }
 

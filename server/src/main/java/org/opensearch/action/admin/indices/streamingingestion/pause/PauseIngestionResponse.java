@@ -33,6 +33,7 @@ package org.opensearch.action.admin.indices.streamingingestion.pause;
 
 import org.opensearch.OpenSearchException;
 import org.opensearch.action.admin.indices.tiering.HotToWarmTieringResponse;
+import org.opensearch.action.support.clustermanager.AcknowledgedResponse;
 import org.opensearch.action.support.clustermanager.ShardsAcknowledgedResponse;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.annotation.ExperimentalApi;
@@ -49,6 +50,7 @@ import org.opensearch.core.xcontent.ToXContentFragment;
 import org.opensearch.core.xcontent.XContentBuilder;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
@@ -60,7 +62,7 @@ import static java.util.Collections.unmodifiableList;
  * @opensearch.api
  */
 @PublicApi(since = "3.0.0")
-public class PauseIngestionResponse extends ShardsAcknowledgedResponse {
+public class PauseIngestionResponse extends AcknowledgedResponse {
 
     private final List<IndexResult> indices;
 
@@ -69,9 +71,9 @@ public class PauseIngestionResponse extends ShardsAcknowledgedResponse {
         indices = unmodifiableList(in.readList(IndexResult::new));
     }
 
-    public PauseIngestionResponse(final boolean acknowledged, final boolean shardsAcknowledged, final List<IndexResult> indices) {
-        super(acknowledged, shardsAcknowledged);
-        this.indices = unmodifiableList(Objects.requireNonNull(indices));
+    public PauseIngestionResponse(final boolean acknowledged, final List<IndexResult> indexResults) {
+        super(acknowledged);
+        this.indices = unmodifiableList(Objects.requireNonNull(indexResults));
     }
 
     public List<IndexResult> getIndices() {
@@ -81,18 +83,17 @@ public class PauseIngestionResponse extends ShardsAcknowledgedResponse {
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         super.writeTo(out);
-        writeShardsAcknowledged(out);
         out.writeList(indices);
     }
 
     @Override
     protected void addCustomFields(final XContentBuilder builder, final Params params) throws IOException {
         super.addCustomFields(builder, params);
-        builder.startObject("indices");
+        builder.startArray("indices");
         for (IndexResult index : indices) {
             index.toXContent(builder, params);
         }
-        builder.endObject();
+        builder.endArray();
     }
 
     @Override

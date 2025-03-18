@@ -299,6 +299,9 @@ import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngesti
 import org.opensearch.action.admin.indices.streamingingestion.resume.ResumeIngestionAction;
 import org.opensearch.action.admin.indices.streamingingestion.resume.ResumeIngestionRequest;
 import org.opensearch.action.admin.indices.streamingingestion.resume.ResumeIngestionResponse;
+import org.opensearch.action.admin.indices.streamingingestion.state.GetIngestionStateAction;
+import org.opensearch.action.admin.indices.streamingingestion.state.GetIngestionStateRequest;
+import org.opensearch.action.admin.indices.streamingingestion.state.GetIngestionStateResponse;
 import org.opensearch.action.admin.indices.template.delete.DeleteIndexTemplateAction;
 import org.opensearch.action.admin.indices.template.delete.DeleteIndexTemplateRequest;
 import org.opensearch.action.admin.indices.template.delete.DeleteIndexTemplateRequestBuilder;
@@ -2170,6 +2173,16 @@ public abstract class AbstractClient implements Client {
         @Override
         public void resumeIngestion(final ResumeIngestionRequest request, final ActionListener<ResumeIngestionResponse> listener) {
             execute(ResumeIngestionAction.INSTANCE, request, listener);
+        }
+
+        @Override
+        public ActionFuture<GetIngestionStateResponse> getIngestionState(final GetIngestionStateRequest request) {
+            return execute(GetIngestionStateAction.INSTANCE, request);
+        }
+
+        @Override
+        public void getIngestionState(final GetIngestionStateRequest request, final ActionListener<GetIngestionStateResponse> listener) {
+            execute(GetIngestionStateAction.INSTANCE, request, listener);
         }
     }
 

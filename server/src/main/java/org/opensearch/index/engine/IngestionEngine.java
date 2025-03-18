@@ -12,6 +12,7 @@ import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.search.IndexSearcher;
 import org.opensearch.ExceptionsHelper;
+import org.opensearch.action.admin.indices.streamingingestion.state.ShardIngestionState;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.IngestionSource;
 import org.opensearch.common.lucene.Lucene;
@@ -104,6 +105,8 @@ public class IngestionEngine extends InternalEngine {
             ingestionSource.getErrorStrategy(),
             ingestionSource.getType()
         );
+
+        StreamPoller.State initialPollerState = indexMetadata.isIngestionPaused() ? StreamPoller.State.PAUSED : StreamPoller.State.NONE;
         streamPoller = new DefaultStreamPoller(
             startPointer,
             persistedPointers,
@@ -111,11 +114,10 @@ public class IngestionEngine extends InternalEngine {
             this,
             resetState,
             resetValue,
-            ingestionErrorStrategy
+            ingestionErrorStrategy,
+            initialPollerState
         );
-        if (indexMetadata.isIngestionPaused() == false) {
-            streamPoller.start();
-        }
+        streamPoller.start();
     }
 
     protected Set<IngestionShardPointer> fetchPersistedOffsets(DirectoryReader directoryReader, IngestionShardPointer batchStart)
@@ -321,6 +323,10 @@ public class IngestionEngine extends InternalEngine {
             streamPoller.start();
         }
         streamPoller.resume();
+    }
+
+    public ShardIngestionState getIngestionState() {
+        return new ShardIngestionState(engineConfig.getShardId().getId(), streamPoller.getState().toString(), streamPoller.getErrorStrategy().getName());
     }
 
     private void registerDynamicIndexSettingsHandlers() {

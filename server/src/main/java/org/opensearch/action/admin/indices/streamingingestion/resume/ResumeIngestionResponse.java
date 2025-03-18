@@ -31,6 +31,7 @@
 
 package org.opensearch.action.admin.indices.streamingingestion.resume;
 
+import org.opensearch.action.support.clustermanager.AcknowledgedResponse;
 import org.opensearch.action.support.clustermanager.ShardsAcknowledgedResponse;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.annotation.PublicApi;
@@ -54,7 +55,7 @@ import static java.util.Collections.unmodifiableList;
  * @opensearch.api
  */
 @PublicApi(since = "3.0.0")
-public class ResumeIngestionResponse extends ShardsAcknowledgedResponse {
+public class ResumeIngestionResponse extends AcknowledgedResponse {
 
     private final List<IndexResult> indices;
 
@@ -63,8 +64,8 @@ public class ResumeIngestionResponse extends ShardsAcknowledgedResponse {
         indices = unmodifiableList(in.readList(IndexResult::new));
     }
 
-    public ResumeIngestionResponse(final boolean acknowledged, final boolean shardsAcknowledged, final List<IndexResult> indices) {
-        super(acknowledged, shardsAcknowledged);
+    public ResumeIngestionResponse(final boolean acknowledged, final List<IndexResult> indices) {
+        super(acknowledged);
         this.indices = unmodifiableList(Objects.requireNonNull(indices));
     }
 
@@ -75,18 +76,17 @@ public class ResumeIngestionResponse extends ShardsAcknowledgedResponse {
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         super.writeTo(out);
-        writeShardsAcknowledged(out);
         out.writeList(indices);
     }
 
     @Override
     protected void addCustomFields(final XContentBuilder builder, final Params params) throws IOException {
         super.addCustomFields(builder, params);
-        builder.startObject("indices");
+        builder.startArray("indices");
         for (IndexResult index : indices) {
             index.toXContent(builder, params);
         }
-        builder.endObject();
+        builder.endArray();
     }
 
     @Override

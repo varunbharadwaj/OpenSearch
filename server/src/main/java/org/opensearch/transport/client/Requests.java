@@ -76,6 +76,7 @@ import org.opensearch.action.admin.indices.settings.put.UpdateSettingsRequest;
 import org.opensearch.action.admin.indices.shards.IndicesShardStoresRequest;
 import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngestionRequest;
 import org.opensearch.action.admin.indices.streamingingestion.resume.ResumeIngestionRequest;
+import org.opensearch.action.admin.indices.streamingingestion.state.GetIngestionStateRequest;
 import org.opensearch.action.admin.indices.upgrade.post.UpgradeRequest;
 import org.opensearch.action.bulk.BulkRequest;
 import org.opensearch.action.delete.DeleteRequest;
@@ -617,5 +618,9 @@ public class Requests {
 
     public static ResumeIngestionRequest resumeIngestionRequest(String... index) {
         return new ResumeIngestionRequest(index);
+    }
+
+    public static GetIngestionStateRequest getIngestionStateRequest(String index) {
+        return new GetIngestionStateRequest(index);
     }
 }

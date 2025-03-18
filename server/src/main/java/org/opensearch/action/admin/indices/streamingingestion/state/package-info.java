@@ -7,4 +7,4 @@
  */
 
 /** Close indices transport handlers. */
-package org.opensearch.action.admin.indices.streamingingestion.get;
+package org.opensearch.action.admin.indices.streamingingestion.state;

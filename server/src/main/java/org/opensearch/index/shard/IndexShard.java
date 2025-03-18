@@ -61,6 +61,7 @@ import org.opensearch.OpenSearchException;
 import org.opensearch.action.ActionRunnable;
 import org.opensearch.action.admin.indices.flush.FlushRequest;
 import org.opensearch.action.admin.indices.forcemerge.ForceMergeRequest;
+import org.opensearch.action.admin.indices.streamingingestion.state.ShardIngestionState;
 import org.opensearch.action.admin.indices.upgrade.post.UpgradeRequest;
 import org.opensearch.action.support.replication.PendingReplicationActions;
 import org.opensearch.action.support.replication.ReplicationResponse;
@@ -5456,5 +5457,16 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 ingestionEngine.resumeIngestion();
             }
         }
+    }
+
+    @Override
+    public ShardIngestionState getIngestionState() {
+        Engine engine = getEngineOrNull();
+        if (indexSettings.getIndexMetadata().useIngestionSource() == false || engine instanceof IngestionEngine == false) {
+            return new ShardIngestionState();
+        }
+
+        IngestionEngine ingestionEngine = (IngestionEngine) engine;
+        return ingestionEngine.getIngestionState();
     }
 }

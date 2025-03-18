@@ -10,10 +10,15 @@ package org.opensearch.cluster.metadata;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.message.ParameterizedMessage;
+import org.opensearch.OpenSearchException;
+import org.opensearch.action.admin.cluster.settings.ClusterUpdateSettingsResponse;
+import org.opensearch.action.admin.indices.close.CloseIndexResponse;
 import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngestionClusterStateUpdateRequest;
 import org.opensearch.action.admin.indices.streamingingestion.pause.PauseIngestionResponse;
 import org.opensearch.action.admin.indices.streamingingestion.resume.ResumeIngestionClusterStateUpdateRequest;
 import org.opensearch.action.admin.indices.streamingingestion.resume.ResumeIngestionResponse;
+import org.opensearch.cluster.AckedClusterStateUpdateTask;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.ClusterStateUpdateTask;
 import org.opensearch.cluster.block.ClusterBlock;
@@ -23,10 +28,13 @@ import org.opensearch.common.inject.Inject;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.Index;
+import org.opensearch.threadpool.ThreadPool;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -38,12 +46,15 @@ public class MetadataStreamingIngestionStateService {
     private static final Logger logger = LogManager.getLogger(MetadataStreamingIngestionStateService.class);
 
     private final ClusterService clusterService;
+    private final ThreadPool threadPool;
 
     @Inject
     public MetadataStreamingIngestionStateService(
-        ClusterService clusterService
+        ClusterService clusterService,
+        ThreadPool threadPool
     ) {
         this.clusterService = clusterService;
+        this.threadPool = threadPool;
     }
 
     /**
@@ -59,26 +70,27 @@ public class MetadataStreamingIngestionStateService {
         }
 
         clusterService.submitStateUpdateTask(
-            "pause-ingestion " + Arrays.toString(concreteIndices),
-            new ClusterStateUpdateTask(Priority.URGENT) {
-
-                private final Map<Index, ClusterBlock> blockedIndices = new HashMap<>();
+            "pause-ingestion",
+            new AckedClusterStateUpdateTask<>(Priority.URGENT, request, listener) {
 
                 @Override
-                public ClusterState execute(final ClusterState currentState) {
-                    return updateIngestionPausedState(concreteIndices, currentState, true);
+                public ClusterState execute(ClusterState currentState) throws Exception {
+                   return updateIngestionPausedState(concreteIndices, currentState, true);
                 }
 
                 @Override
-                public void clusterStateProcessed(final String source, final ClusterState oldState, final ClusterState newState) {
-                    // todo: verify pollers have been paused on all the requested index shards
-                    boolean shardsAcked = oldState != newState;
-                    listener.onResponse(new PauseIngestionResponse(true, shardsAcked, Collections.emptyList()));
+                protected PauseIngestionResponse newResponse(boolean acknowledged) {
+                    List<PauseIngestionResponse.IndexResult> results = new ArrayList<>();
+                    for (Index index: concreteIndices) {
+                        results.add(new PauseIngestionResponse.IndexResult(index.getName(), ""));
+                    }
+
+                    return new PauseIngestionResponse(acknowledged, results);
                 }
 
                 @Override
-                public void onFailure(final String source, final Exception e) {
-                    listener.onFailure(e);
+                public void onFailure(String source, Exception e) {
+                    listener.onFailure(new OpenSearchException("pause ingestion failed", e));
                 }
 
                 @Override
@@ -96,26 +108,27 @@ public class MetadataStreamingIngestionStateService {
         }
 
         clusterService.submitStateUpdateTask(
-            "resume-ingestion " + Arrays.toString(concreteIndices),
-            new ClusterStateUpdateTask(Priority.URGENT) {
-
-                private final Map<Index, ClusterBlock> blockedIndices = new HashMap<>();
+            "resume-ingestion",
+            new AckedClusterStateUpdateTask<>(Priority.URGENT, request, listener) {
 
                 @Override
-                public ClusterState execute(final ClusterState currentState) {
+                public ClusterState execute(ClusterState currentState) throws Exception {
                     return updateIngestionPausedState(concreteIndices, currentState, false);
                 }
 
                 @Override
-                public void clusterStateProcessed(final String source, final ClusterState oldState, final ClusterState newState) {
-                    // todo: verify pollers have been paused on all the requested index shards
-                    boolean shardsAcked = oldState != newState;
-                    listener.onResponse(new ResumeIngestionResponse(true, shardsAcked, Collections.emptyList()));
+                protected ResumeIngestionResponse newResponse(boolean acknowledged) {
+                    List<ResumeIngestionResponse.IndexResult> results = new ArrayList<>();
+                    for (Index index: concreteIndices) {
+                        results.add(new ResumeIngestionResponse.IndexResult(index.getName(), ""));
+                    }
+
+                    return new ResumeIngestionResponse(acknowledged, results);
                 }
 
                 @Override
-                public void onFailure(final String source, final Exception e) {
-                    listener.onFailure(e);
+                public void onFailure(String source, Exception e) {
+                    listener.onFailure(new OpenSearchException("resume ingestion failed", e));
                 }
 
                 @Override
@@ -133,7 +146,7 @@ public class MetadataStreamingIngestionStateService {
             final IndexMetadata indexMetadata = metadata.getSafe(index);
 
             if (indexMetadata.useIngestionSource() == false) {
-                logger.debug("Pause request will be ignored for index {} as streaming ingestion is not enabled", index);
+                logger.debug("Pause/resume request will be ignored for index {} as streaming ingestion is not enabled", index);
             }
 
             if (indexMetadata.isIngestionPaused() != ingestionPaused) {
