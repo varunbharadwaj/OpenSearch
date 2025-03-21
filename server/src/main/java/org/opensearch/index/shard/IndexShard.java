@@ -5449,13 +5449,20 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             return;
         }
 
+        updateShardIngestionState(indexMetadata.isIngestionPaused());
+    }
+
+    /**
+     * Updates the ingestion state by delegating to the ingestion engine.
+     */
+    public void updateShardIngestionState(boolean ingestionPaused) {
         synchronized (engineMutex) {
             if (getEngineOrNull() instanceof IngestionEngine == false) {
                 return;
             }
 
             IngestionEngine ingestionEngine = (IngestionEngine) getEngineOrNull();
-            if (indexMetadata.isIngestionPaused()) {
+            if (ingestionPaused) {
                 ingestionEngine.pauseIngestion();
             } else {
                 ingestionEngine.resumeIngestion();

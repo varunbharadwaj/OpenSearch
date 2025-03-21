@@ -172,6 +172,7 @@ public class RemoteStoreKafkaIT extends KafkaIngestionBaseIT {
         // pause ingestion
         PauseIngestionResponse pauseResponse = pauseIngestion(indexName);
         assertTrue(pauseResponse.isAcknowledged());
+        assertTrue(pauseResponse.isShardsAcknowledged());
         waitForState(() -> {
             GetIngestionStateResponse ingestionState = getIngestionState(indexName);
             return Arrays.stream(ingestionState.getShardStates()).allMatch(state -> state.getPollerState().equalsIgnoreCase("paused"));
@@ -197,6 +198,7 @@ public class RemoteStoreKafkaIT extends KafkaIngestionBaseIT {
         // resume ingestion
         ResumeIngestionResponse resumeResponse = resumeIngestion(indexName);
         assertTrue(resumeResponse.isAcknowledged());
+        assertTrue(resumeResponse.isShardsAcknowledged());
         waitForState(() -> {
             GetIngestionStateResponse ingestionState = getIngestionState(indexName);
             return Arrays.stream(ingestionState.getShardStates())
