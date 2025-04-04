@@ -93,14 +93,15 @@ public class KafkaIngestionBaseIT extends OpenSearchIntegTestCase {
     }
 
     protected void produceData(String id, String name, String age) {
-        produceData(id, name, age, defaultMessageTimestamp);
+        produceData(id, name, age, defaultMessageTimestamp, "index");
     }
 
-    protected void produceData(String id, String name, String age, long timestamp) {
+    protected void produceData(String id, String name, String age, long timestamp, String opType) {
         String payload = String.format(
             Locale.ROOT,
-            "{\"_id\":\"%s\", \"_op_type:\":\"index\",\"_source\":{\"name\":\"%s\", \"age\": %s}}",
+            "{\"_id\":\"%s\", \"_op_type\":\"%s\",\"_source\":{\"name\":\"%s\", \"age\": %s}}",
             id,
+            opType,
             name,
             age
         );
