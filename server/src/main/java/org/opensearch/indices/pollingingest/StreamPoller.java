@@ -14,6 +14,7 @@ import org.opensearch.index.IngestionShardConsumer;
 import org.opensearch.index.IngestionShardPointer;
 
 import java.io.Closeable;
+import java.util.Locale;
 
 /**
  * A poller for reading messages from an ingestion shard. This is used in the ingestion engine.
@@ -76,6 +77,13 @@ public interface StreamPoller extends Closeable, ClusterStateListener {
     IngestionShardConsumer getConsumer();
 
     /**
+     * Update the end point settings for the poller
+     * @param endPointType the new end point type
+     * @param endPointValue the new end point value
+     */
+    void updateIngestionEndPoint(EndState endPointType, String endPointValue);
+
+    /**
      * A state to indicate the current state of the poller
      */
     enum State {
@@ -96,5 +104,23 @@ public interface StreamPoller extends Closeable, ClusterStateListener {
         RESET_BY_OFFSET,
         RESET_BY_TIMESTAMP,
         NONE,
+    }
+
+    /**
+     *  EndState for the poller defining when to stop polling.
+     */
+    @ExperimentalApi
+    enum EndState {
+        NONE,
+        END_BY_OFFSET,
+        END_BY_TIMESTAMP;
+
+        public static EndState parseFromString(String endState) {
+            try {
+                return EndState.valueOf(endState.toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("Invalid StreamPoller end state: " + endState, e);
+            }
+        }
     }
 }

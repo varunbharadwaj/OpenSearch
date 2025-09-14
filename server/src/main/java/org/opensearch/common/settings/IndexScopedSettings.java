@@ -277,6 +277,8 @@ public final class IndexScopedSettings extends AbstractScopedSettings {
                 IndexMetadata.INGESTION_SOURCE_POLL_TIMEOUT,
                 IndexMetadata.INGESTION_SOURCE_NUM_PROCESSOR_THREADS_SETTING,
                 IndexMetadata.INGESTION_SOURCE_INTERNAL_QUEUE_SIZE_SETTING,
+                IndexMetadata.INGESTION_SOURCE_POINTER_END_TYPE_SETTING,
+                IndexMetadata.INGESTION_SOURCE_POINTER_END_VALUE_SETTING,
 
                 // Settings for search replica
                 IndexMetadata.INDEX_NUMBER_OF_SEARCH_REPLICAS_SETTING,

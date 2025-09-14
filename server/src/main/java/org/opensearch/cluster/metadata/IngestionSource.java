@@ -31,6 +31,7 @@ public class IngestionSource {
     private final PointerInitReset pointerInitReset;
     private final IngestionErrorStrategy.ErrorStrategy errorStrategy;
     private final Map<String, Object> params;
+    private final PointerEndState pointerEndState;
     private final long maxPollSize;
     private final int pollTimeout;
     private int numProcessorThreads;
@@ -41,6 +42,7 @@ public class IngestionSource {
         PointerInitReset pointerInitReset,
         IngestionErrorStrategy.ErrorStrategy errorStrategy,
         Map<String, Object> params,
+        PointerEndState pointerEndState,
         long maxPollSize,
         int pollTimeout,
         int numProcessorThreads,
@@ -50,6 +52,7 @@ public class IngestionSource {
         this.pointerInitReset = pointerInitReset;
         this.params = params;
         this.errorStrategy = errorStrategy;
+        this.pointerEndState = pointerEndState;
         this.maxPollSize = maxPollSize;
         this.pollTimeout = pollTimeout;
         this.numProcessorThreads = numProcessorThreads;
@@ -88,6 +91,10 @@ public class IngestionSource {
         return blockingQueueSize;
     }
 
+    public PointerEndState getPointerEndState() {
+        return pointerEndState;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
@@ -100,7 +107,8 @@ public class IngestionSource {
             && Objects.equals(maxPollSize, ingestionSource.maxPollSize)
             && Objects.equals(pollTimeout, ingestionSource.pollTimeout)
             && Objects.equals(numProcessorThreads, ingestionSource.numProcessorThreads)
-            && Objects.equals(blockingQueueSize, ingestionSource.blockingQueueSize);
+            && Objects.equals(blockingQueueSize, ingestionSource.blockingQueueSize)
+            && Objects.equals(pointerEndState, ingestionSource.pointerEndState);
     }
 
     @Override
@@ -113,7 +121,8 @@ public class IngestionSource {
             maxPollSize,
             pollTimeout,
             numProcessorThreads,
-            blockingQueueSize
+            blockingQueueSize,
+            pointerEndState
         );
     }
 
@@ -125,6 +134,9 @@ public class IngestionSource {
             + '\''
             + ",pointer_init_reset='"
             + pointerInitReset
+            + '\''
+            + ",pointer_end_state='"
+            + pointerEndState
             + '\''
             + ",error_strategy='"
             + errorStrategy
@@ -183,6 +195,12 @@ public class IngestionSource {
     }
 
     /**
+     * Class encapsulating the configuration of a pointer end point.
+     */
+    @ExperimentalApi
+    public record PointerEndState(StreamPoller.EndState endState, String value) { }
+
+    /**
      * Builder for {@link IngestionSource}.
      *
      */
@@ -190,6 +208,7 @@ public class IngestionSource {
     public static class Builder {
         private String type;
         private PointerInitReset pointerInitReset;
+        private PointerEndState pointerEndState;
         private IngestionErrorStrategy.ErrorStrategy errorStrategy;
         private Map<String, Object> params;
         private long maxPollSize = INGESTION_SOURCE_MAX_POLL_SIZE.getDefault(Settings.EMPTY);
@@ -208,10 +227,16 @@ public class IngestionSource {
             this.errorStrategy = ingestionSource.errorStrategy;
             this.params = ingestionSource.params;
             this.blockingQueueSize = ingestionSource.blockingQueueSize;
+            this.pointerEndState = ingestionSource.pointerEndState;
         }
 
         public Builder setPointerInitReset(PointerInitReset pointerInitReset) {
             this.pointerInitReset = pointerInitReset;
+            return this;
+        }
+
+        public Builder setPointerEndState(PointerEndState pointerEndState) {
+            this.pointerEndState = pointerEndState;
             return this;
         }
 
@@ -256,6 +281,7 @@ public class IngestionSource {
                 pointerInitReset,
                 errorStrategy,
                 params,
+                pointerEndState,
                 maxPollSize,
                 pollTimeout,
                 numProcessorThreads,

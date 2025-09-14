@@ -142,6 +142,9 @@ public class IngestionEngine extends InternalEngine {
             ? StreamPoller.State.PAUSED
             : StreamPoller.State.NONE;
 
+        StreamPoller.EndState endPointState = ingestionSource.getPointerEndState().endState();
+        String endPointValue = ingestionSource.getPointerEndState().value();
+
         // initialize the stream poller
         DefaultStreamPoller.Builder streamPollerBuilder = new DefaultStreamPoller.Builder(
             startPointer,
@@ -159,6 +162,8 @@ public class IngestionEngine extends InternalEngine {
             .pollTimeout(ingestionSource.getPollTimeout())
             .numProcessorThreads(ingestionSource.getNumProcessorThreads())
             .blockingQueueSize(ingestionSource.getBlockingQueueSize())
+            .endState(endPointState)
+            .endStateValue(endPointValue)
             .build();
         registerStreamPollerListener();
 
@@ -500,6 +505,29 @@ public class IngestionEngine extends InternalEngine {
         engineConfig.getIndexSettings()
             .getScopedSettings()
             .addSettingsUpdateConsumer(IndexMetadata.INGESTION_SOURCE_ERROR_STRATEGY_SETTING, this::updateErrorHandlingStrategy);
+
+        // Add handler for end point settings - both type and value together
+        engineConfig.getIndexSettings()
+            .getScopedSettings()
+            .addSettingsUpdateConsumer(
+                IndexMetadata.INGESTION_SOURCE_POINTER_END_TYPE_SETTING,
+                IndexMetadata.INGESTION_SOURCE_POINTER_END_VALUE_SETTING,
+                this::updateEndPointSettings
+            );
+    }
+
+    /**
+     * Update end point settings for the stream poller
+     * @param endPointType the end point type
+     * @param endPointValue the end point value (offset or timestamp)
+     */
+    private void updateEndPointSettings(StreamPoller.EndState endPointType, String endPointValue) {
+        if (streamPoller != null) {
+            streamPoller.updateIngestionEndPoint(endPointType, endPointValue);
+            logger.info("Updated ingestion end point - type: {}, value: {}", endPointType, endPointValue);
+        } else {
+            logger.warn("Stream poller is null, cannot update ingestion end point");
+        }
     }
 
     /**

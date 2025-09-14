@@ -12,6 +12,7 @@ import org.opensearch.action.admin.cluster.node.info.NodeInfo;
 import org.opensearch.action.admin.cluster.node.info.NodesInfoRequest;
 import org.opensearch.action.admin.cluster.node.info.NodesInfoResponse;
 import org.opensearch.action.admin.cluster.node.info.PluginsAndModules;
+import org.opensearch.action.admin.indices.streamingingestion.state.GetIngestionStateResponse;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.settings.Settings;
@@ -24,6 +25,7 @@ import org.opensearch.test.OpenSearchIntegTestCase;
 import org.opensearch.transport.client.Requests;
 import org.junit.Assert;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
@@ -235,5 +237,231 @@ public class IngestFromKafkaIT extends KafkaIngestionBaseIT {
             SearchResponse response = client().prepareSearch(indexName).setQuery(query).get();
             return response.getHits().getTotalHits().value() == 1000;
         });
+    }
+
+    public void testKafkaIngestionWithOffsetRange() throws Exception {
+        // Produce 5 messages
+        for (int i = 1; i <= 5; i++) {
+            produceData(String.valueOf(i), "name" + i, String.valueOf(20 + i));
+        }
+
+        // Create index with offset range: start from offset 1, end at offset 3
+        createIndex(
+            "test_offset_range",
+            Settings.builder()
+                .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+                .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
+                .put("ingestion_source.type", "kafka")
+                .put("ingestion_source.pointer.init.reset", "reset_by_offset")
+                .put("ingestion_source.pointer.init.reset.value", "1") // Start from offset 1
+                .put("ingestion_source.pointer.end.type", "end_by_offset")
+                .put("ingestion_source.pointer.end.value", "3") // End at offset 3
+                .put("ingestion_source.param.topic", "test")
+                .put("ingestion_source.param.bootstrap_servers", kafka.getBootstrapServers())
+                .put("ingestion_source.param.auto.offset.reset", "latest")
+                .build(),
+            "{\"properties\":{\"name\":{\"type\": \"text\"},\"age\":{\"type\": \"integer\"}}}}"
+        );
+
+        // Wait for ingestion to complete and poller to be CLOSED
+        waitForState(() -> {
+            GetIngestionStateResponse ingestionState = getIngestionState("test_offset_range");
+            return ingestionState.getFailedShards() == 0
+                && Arrays.stream(ingestionState.getShardStates())
+                .allMatch(state -> state.pollerState().equalsIgnoreCase("closed"));
+        });
+
+        // Now query and validate the results
+        refresh("test_offset_range");
+        RangeQueryBuilder query = new RangeQueryBuilder("age").gte(0);
+        SearchResponse response = client().prepareSearch("test_offset_range").setQuery(query).get();
+
+        assertThat("Should ingest exactly 3 messages (offsets 1, 2, 3)",
+            response.getHits().getTotalHits().value(), is(3L));
+
+        // Verify the ingestion stats
+        PollingIngestStats stats = client().admin().indices().prepareStats("test_offset_range")
+            .get().getIndex("test_offset_range").getShards()[0].getPollingIngestStats();
+        assertNotNull(stats);
+        assertThat("Should have polled exactly 3 messages",
+            stats.getConsumerStats().totalPolledCount(), is(3L));
+    }
+
+    public void testKafkaIngestionWithOffsetInFuture() throws Exception {
+        // Produce 3 messages first
+        for (int i = 1; i <= 3; i++) {
+            produceData(String.valueOf(i), "name" + i, String.valueOf(20 + i));
+        }
+
+        // Create index with end offset in future (offset 10, but we only have 3 messages at offsets 0,1,2)
+        createIndex(
+            "test_offset_future",
+            Settings.builder()
+                .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+                .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
+                .put("ingestion_source.type", "kafka")
+                .put("ingestion_source.pointer.init.reset", "earliest")
+                .put("ingestion_source.pointer.end.type", "end_by_offset")
+                .put("ingestion_source.pointer.end.value", "10") // Future offset
+                .put("ingestion_source.param.topic", "test")
+                .put("ingestion_source.param.bootstrap_servers", kafka.getBootstrapServers())
+                .put("ingestion_source.param.auto.offset.reset", "latest")
+                .build(),
+            "{\"properties\":{\"name\":{\"type\": \"text\"},\"age\":{\"type\": \"integer\"}}}}"
+        );
+
+        // Produce more messages to reach and exceed the end offset
+        for (int i = 4; i <= 12; i++) { // Produce enough to go beyond offset 10
+            produceData(String.valueOf(i), "name" + i, String.valueOf(20 + i));
+        }
+
+        // Wait for ingestion to complete and poller to be CLOSED
+        waitForState(() -> {
+            GetIngestionStateResponse ingestionState = getIngestionState("test_offset_future");
+            return ingestionState.getFailedShards() == 0
+                && Arrays.stream(ingestionState.getShardStates())
+                .allMatch(state -> state.pollerState().equalsIgnoreCase("closed"));
+        });
+
+        // Now query and validate the results
+        refresh("test_offset_future");
+        RangeQueryBuilder query = new RangeQueryBuilder("age").gte(0);
+        SearchResponse response = client().prepareSearch("test_offset_future").setQuery(query).get();
+
+        // Should ingest messages from offset 0 to 10 (inclusive), so 11 messages total
+        assertThat("Should ingest messages up to offset 10",
+            response.getHits().getTotalHits().value(), is(11L));
+    }
+
+    public void testKafkaIngestionWithTimestampRange() throws Exception {
+        long baseTimestamp = System.currentTimeMillis();
+        long startTimestamp = baseTimestamp + 10000; // 10 seconds from now
+        long endTimestamp = baseTimestamp + 30000;   // 30 seconds from now
+
+        // Produce messages with different timestamps
+        produceData("1", "name1", "21", baseTimestamp, "index");           // Before range
+        produceData("2", "name2", "22", startTimestamp + 5000, "index");   // Within range
+        produceData("3", "name3", "23", startTimestamp + 10000, "index");  // Within range
+        produceData("4", "name4", "24", startTimestamp + 15000, "index");  // Within range
+        produceData("5", "name5", "25", endTimestamp + 5000, "index");     // After range
+
+        // Create index with timestamp range
+        createIndex(
+            "test_timestamp_range",
+            Settings.builder()
+                .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+                .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
+                .put("ingestion_source.type", "kafka")
+                .put("ingestion_source.pointer.init.reset", "reset_by_timestamp")
+                .put("ingestion_source.pointer.init.reset.value", String.valueOf(startTimestamp))
+                .put("ingestion_source.pointer.end.type", "end_by_timestamp")
+                .put("ingestion_source.pointer.end.value", String.valueOf(endTimestamp))
+                .put("ingestion_source.param.topic", "test")
+                .put("ingestion_source.param.bootstrap_servers", kafka.getBootstrapServers())
+                .put("ingestion_source.param.auto.offset.reset", "latest")
+                .build(),
+            "{\"properties\":{\"name\":{\"type\": \"text\"},\"age\":{\"type\": \"integer\"}}}}"
+        );
+
+        // Wait for ingestion to complete and poller to be CLOSED
+        waitForState(() -> {
+            GetIngestionStateResponse ingestionState = getIngestionState("test_timestamp_range");
+            return ingestionState.getFailedShards() == 0
+                && Arrays.stream(ingestionState.getShardStates())
+                .allMatch(state -> state.pollerState().equalsIgnoreCase("closed"));
+        });
+
+        // Now query and validate the results
+        refresh("test_timestamp_range");
+        RangeQueryBuilder query = new RangeQueryBuilder("age").gte(0);
+        SearchResponse response = client().prepareSearch("test_timestamp_range").setQuery(query).get();
+
+        assertThat("Should ingest exactly 3 messages within timestamp range",
+            response.getHits().getTotalHits().value(), is(3L));
+
+        // Verify the correct messages were ingested (ages 22, 23, 24)
+        RangeQueryBuilder ageQuery = new RangeQueryBuilder("age").gte(22).lte(24);
+        SearchResponse ageResponse = client().prepareSearch("test_timestamp_range").setQuery(ageQuery).get();
+        assertThat("Should have messages with ages 22-24",
+            ageResponse.getHits().getTotalHits().value(), is(3L));
+
+        // Verify messages outside the range were not ingested
+        RangeQueryBuilder beforeQuery = new RangeQueryBuilder("age").lt(22);
+        SearchResponse beforeResponse = client().prepareSearch("test_timestamp_range").setQuery(beforeQuery).get();
+        assertThat("Should not have messages before timestamp range",
+            beforeResponse.getHits().getTotalHits().value(), is(0L));
+
+        RangeQueryBuilder afterQuery = new RangeQueryBuilder("age").gt(24);
+        SearchResponse afterResponse = client().prepareSearch("test_timestamp_range").setQuery(afterQuery).get();
+        assertThat("Should not have messages after timestamp range",
+            afterResponse.getHits().getTotalHits().value(), is(0L));
+    }
+
+    public void testKafkaIngestionWithTimestampInFuture() throws Exception {
+        long baseTimestamp = System.currentTimeMillis();
+        long futureTimestamp = baseTimestamp + 60000; // 1 minute in future
+
+        // Produce initial messages with current timestamps
+        for (int i = 1; i <= 3; i++) {
+            produceData(String.valueOf(i), "name" + i, String.valueOf(20 + i), baseTimestamp + (i * 1000), "index");
+        }
+
+        // Produce more messages with timestamps before the future end timestamp
+        long midTimestamp = baseTimestamp + 30000; // 30 seconds from base
+        for (int i = 4; i <= 6; i++) {
+            produceData(String.valueOf(i), "name" + i, String.valueOf(20 + i), midTimestamp + (i * 1000), "index");
+        }
+
+        // Produce messages with timestamps beyond the future end timestamp
+        long beyondFutureTimestamp = futureTimestamp + 10000; // Beyond the end timestamp
+        for (int i = 7; i <= 9; i++) {
+            produceData(String.valueOf(i), "name" + i, String.valueOf(20 + i), beyondFutureTimestamp + (i * 1000), "index");
+        }
+
+        // Create index with end timestamp in future
+        createIndex(
+            "test_timestamp_future",
+            Settings.builder()
+                .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+                .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
+                .put("ingestion_source.type", "kafka")
+                .put("ingestion_source.pointer.init.reset", "earliest")
+                .put("ingestion_source.pointer.end.type", "end_by_timestamp")
+                .put("ingestion_source.pointer.end.value", String.valueOf(futureTimestamp))
+                .put("ingestion_source.param.topic", "test")
+                .put("ingestion_source.param.bootstrap_servers", kafka.getBootstrapServers())
+                .put("ingestion_source.param.auto.offset.reset", "latest")
+                .build(),
+            "{\"properties\":{\"name\":{\"type\": \"text\"},\"age\":{\"type\": \"integer\"}}}}"
+        );
+
+        // Wait for ingestion to complete and poller to be CLOSED
+        waitForState(() -> {
+            GetIngestionStateResponse ingestionState = getIngestionState("test_timestamp_future");
+            return ingestionState.getFailedShards() == 0
+                && Arrays.stream(ingestionState.getShardStates())
+                .allMatch(state -> state.pollerState().equalsIgnoreCase("closed"));
+        });
+
+        // Now query and validate the results
+        refresh("test_timestamp_future");
+        RangeQueryBuilder query = new RangeQueryBuilder("age").gte(0);
+        SearchResponse response = client().prepareSearch("test_timestamp_future").setQuery(query).get();
+
+        // Should have ingested only the 6 messages with timestamps before the future end timestamp
+        assertThat("Should ingest only messages before future end timestamp",
+            response.getHits().getTotalHits().value(), is(6L));
+
+        // Verify the correct age range was ingested (ages 21-26, not 27-29)
+        RangeQueryBuilder validAgeQuery = new RangeQueryBuilder("age").gte(21).lte(26);
+        SearchResponse validAgeResponse = client().prepareSearch("test_timestamp_future").setQuery(validAgeQuery).get();
+        assertThat("Should have messages with ages 21-26",
+            validAgeResponse.getHits().getTotalHits().value(), is(6L));
+
+        // Verify messages beyond the end timestamp were not ingested
+        RangeQueryBuilder beyondQuery = new RangeQueryBuilder("age").gte(27).lte(29);
+        SearchResponse beyondResponse = client().prepareSearch("test_timestamp_future").setQuery(beyondQuery).get();
+        assertThat("Should not have messages beyond end timestamp",
+            beyondResponse.getHits().getTotalHits().value(), is(0L));
     }
 }

@@ -66,6 +66,11 @@ public class DefaultStreamPoller implements StreamPoller {
     private ResetState resetState;
     private final String resetValue;
 
+    // ingestion end point
+    private final StreamPoller.EndState endPointState;
+    private final String endPointValue;
+    private IngestionShardPointer endPointer;
+
     private long maxPollSize;
     private int pollTimeout;
 
@@ -95,6 +100,8 @@ public class DefaultStreamPoller implements StreamPoller {
         IngestionEngine ingestionEngine,
         ResetState resetState,
         String resetValue,
+        StreamPoller.EndState endPointState,
+        String endPointValue,
         IngestionErrorStrategy errorStrategy,
         State initialState,
         long maxPollSize,
@@ -111,6 +118,8 @@ public class DefaultStreamPoller implements StreamPoller {
             new PartitionedBlockingQueueContainer(numProcessorThreads, shardId, ingestionEngine, errorStrategy, blockingQueueSize),
             resetState,
             resetValue,
+            endPointState,
+            endPointValue,
             errorStrategy,
             initialState,
             maxPollSize,
@@ -131,6 +140,8 @@ public class DefaultStreamPoller implements StreamPoller {
         PartitionedBlockingQueueContainer blockingQueueContainer,
         ResetState resetState,
         String resetValue,
+        StreamPoller.EndState endPointState,
+        String endPointValue,
         IngestionErrorStrategy errorStrategy,
         State initialState,
         long maxPollSize,
@@ -156,6 +167,8 @@ public class DefaultStreamPoller implements StreamPoller {
         );
         this.errorStrategy = errorStrategy;
         this.indexName = indexSettings.getIndex().getName();
+        this.endPointState = endPointState;
+        this.endPointValue = endPointValue;
 
         // handle initial poller states
         this.paused = initialState == State.PAUSED;
@@ -206,6 +219,8 @@ public class DefaultStreamPoller implements StreamPoller {
 
                 // reset the consumer offset
                 handleResetState();
+                // set the end point
+                handleEndPointState();
 
                 if (paused || isWriteBlockEnabled) {
                     state = State.PAUSED;
@@ -259,6 +274,13 @@ public class DefaultStreamPoller implements StreamPoller {
 
         for (IngestionShardConsumer.ReadResult<? extends IngestionShardPointer, ? extends Message> result : results) {
             try {
+                // Check if we've reached the end point
+                if (hasReachedEndPoint(result.getPointer())) {
+                    logger.info("Reached end point at pointer {}. Stopping ingestion.", result.getPointer().asString());
+                    closed = true; // This will cause the polling loop to exit
+                    break;
+                }
+
                 // check if the message is already processed
                 if (isProcessed(result.getPointer())) {
                     logger.debug("Skipping message with pointer {} as it is already processed", result.getPointer().asString());
@@ -438,6 +460,11 @@ public class DefaultStreamPoller implements StreamPoller {
     }
 
     @Override
+    public void updateIngestionEndPoint(EndState endPointType, String endPointValue) {
+
+    }
+
+    @Override
     public void clusterChanged(ClusterChangedEvent event) {
         try {
             if (event.blocksChanged() == false) {
@@ -504,6 +531,39 @@ public class DefaultStreamPoller implements StreamPoller {
     }
 
     /**
+     * Handles the end pointer based on provided offset or timestamp. For future timestamps mapping to non-existent
+     * events, the result is consumer implementation dependent and might result in errors.
+     */
+    private void handleEndPointState() {
+        if (endPointState != StreamPoller.EndState.NONE && endPointer == null) {
+            switch (endPointState) {
+                case END_BY_OFFSET:
+                    endPointer = consumer.pointerFromOffset(endPointValue);
+                    logger.info("Setting end pointer by offset to {}", endPointer.asString());
+                    break;
+                case END_BY_TIMESTAMP:
+                    endPointer = consumer.pointerFromTimestampMillis(Long.parseLong(endPointValue));
+                    logger.info(
+                        "Setting end pointer by timestamp {} to {}",
+                        endPointValue,
+                        endPointer.asString()
+                    );
+                    break;
+            }
+        }
+    }
+
+    /**
+     * Returns if ingestion has gone beyond the configured end point.
+     */
+    private boolean hasReachedEndPoint(IngestionShardPointer currentPointer) {
+        if (endPointer == null) {
+            return false;
+        }
+        return currentPointer.compareTo(endPointer) > 0;
+    }
+
+    /**
      * Builder for DefaultStreamPoller
      */
     public static class Builder {
@@ -515,6 +575,8 @@ public class DefaultStreamPoller implements StreamPoller {
         private IngestionEngine ingestionEngine;
         private ResetState resetState = ResetState.LATEST;
         private String resetValue = "";
+        private EndState endState = EndState.NONE;
+        private String endValue;
         private IngestionErrorStrategy errorStrategy;
         private State initialState = State.NONE;
         private long maxPollSize = 1000;
@@ -607,6 +669,22 @@ public class DefaultStreamPoller implements StreamPoller {
         }
 
         /**
+         * Set pointer end state
+         */
+        public Builder endState(EndState endState) {
+            this.endState = endState;
+            return this;
+        }
+
+        /**
+         * Set pointer end state value
+         */
+        public Builder endStateValue(String endValue) {
+            this.endValue = endValue;
+            return this;
+        }
+
+        /**
          * Build the DefaultStreamPoller instance
          */
         public DefaultStreamPoller build() {
@@ -619,6 +697,8 @@ public class DefaultStreamPoller implements StreamPoller {
                 ingestionEngine,
                 resetState,
                 resetValue,
+                endState,
+                endValue,
                 errorStrategy,
                 initialState,
                 maxPollSize,

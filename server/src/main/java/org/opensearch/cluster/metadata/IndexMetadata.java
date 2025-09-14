@@ -846,6 +846,30 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
     );
 
     /**
+     * Defines the setting for the end point type for pull-based ingestion. Defaults to none.
+     */
+    public static final String SETTING_INGESTION_SOURCE_POINTER_END_TYPE = "index.ingestion_source.pointer.end.type";
+    public static final Setting<StreamPoller.EndState> INGESTION_SOURCE_POINTER_END_TYPE_SETTING = new Setting<>(
+        SETTING_INGESTION_SOURCE_POINTER_END_TYPE,
+        StreamPoller.EndState.NONE.name(),
+        StreamPoller.EndState::parseFromString,
+        (endState) -> {},
+        Property.IndexScope,
+        Property.Dynamic
+    );
+
+    /**
+     * Defines the setting for the end point value, which can be either offset or timestamp.
+     */
+    public static final String SETTING_INGESTION_SOURCE_POINTER_END_VALUE = "index.ingestion_source.pointer.end.value";
+    public static final Setting<String> INGESTION_SOURCE_POINTER_END_VALUE_SETTING = Setting.simpleString(
+        SETTING_INGESTION_SOURCE_POINTER_END_VALUE,
+        "",
+        Property.IndexScope,
+        Property.Dynamic
+    );
+
+    /**
      * Defines the error strategy for pull-based ingestion.
      */
     public static final String SETTING_INGESTION_SOURCE_ERROR_STRATEGY = "index.ingestion_source.error_strategy";
@@ -1145,6 +1169,13 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
                 pointerInitResetValue
             );
 
+            final StreamPoller.EndState pointerEndType = INGESTION_SOURCE_POINTER_END_TYPE_SETTING.get(settings);
+            final String pointerEndValue = INGESTION_SOURCE_POINTER_END_VALUE_SETTING.get(settings);
+            IngestionSource.PointerEndState pointerEndState = new IngestionSource.PointerEndState(
+                pointerEndType,
+                pointerEndValue
+            );
+
             final IngestionErrorStrategy.ErrorStrategy errorStrategy = INGESTION_SOURCE_ERROR_STRATEGY_SETTING.get(settings);
             final Map<String, Object> ingestionSourceParams = INGESTION_SOURCE_PARAMS_SETTING.getAsMap(settings);
             final long maxPollSize = INGESTION_SOURCE_MAX_POLL_SIZE.get(settings);
@@ -1159,6 +1190,7 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
                 .setPollTimeout(pollTimeout)
                 .setNumProcessorThreads(numProcessorThreads)
                 .setBlockingQueueSize(blockingQueueSize)
+                .setPointerEndState(pointerEndState)
                 .build();
         }
         return null;
