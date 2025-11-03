@@ -26,10 +26,12 @@ import java.util.Objects;
 public class PollingIngestStats implements Writeable, ToXContentFragment {
     private final MessageProcessorStats messageProcessorStats;
     private final ConsumerStats consumerStats;
+    private final EngineStats engineStats;
 
-    public PollingIngestStats(MessageProcessorStats messageProcessorStats, ConsumerStats consumerStats) {
+    public PollingIngestStats(MessageProcessorStats messageProcessorStats, ConsumerStats consumerStats, EngineStats engineStats) {
         this.messageProcessorStats = messageProcessorStats;
         this.consumerStats = consumerStats;
+        this.engineStats = engineStats;
     }
 
     public PollingIngestStats(StreamInput in) throws IOException {
@@ -68,6 +70,13 @@ public class PollingIngestStats implements Writeable, ToXContentFragment {
             totalDuplicateMessageSkippedCount,
             pointerBasedLag
         );
+
+        long totalPeriodicFlushCount = 0;
+        if (in.getVersion().onOrAfter(Version.V_3_4_0)) {
+            totalPeriodicFlushCount = in.readLong();
+        }
+
+        this.engineStats = new EngineStats(totalPeriodicFlushCount);
     }
 
     @Override
@@ -87,6 +96,7 @@ public class PollingIngestStats implements Writeable, ToXContentFragment {
 
         if (out.getVersion().onOrAfter(Version.V_3_4_0)) {
             out.writeLong(consumerStats.pointerBasedLag);
+            out.writeLong(engineStats.totalPeriodicFlushCount);
         }
     }
 
@@ -110,6 +120,9 @@ public class PollingIngestStats implements Writeable, ToXContentFragment {
         builder.field("lag_in_millis", consumerStats.lagInMillis);
         builder.field("pointer_based_lag", consumerStats.pointerBasedLag);
         builder.endObject();
+        builder.startObject("engine_stats");
+        builder.field("total_periodic_flush_count", engineStats.totalPeriodicFlushCount);
+        builder.endObject();
         builder.endObject();
         return builder;
     }
@@ -122,17 +135,23 @@ public class PollingIngestStats implements Writeable, ToXContentFragment {
         return consumerStats;
     }
 
+    public EngineStats getEngineStats() {
+        return engineStats;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
         if (!(o instanceof PollingIngestStats)) return false;
         PollingIngestStats that = (PollingIngestStats) o;
-        return Objects.equals(messageProcessorStats, that.messageProcessorStats) && Objects.equals(consumerStats, that.consumerStats);
+        return Objects.equals(messageProcessorStats, that.messageProcessorStats) 
+            && Objects.equals(consumerStats, that.consumerStats)
+            && Objects.equals(engineStats, that.engineStats);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(messageProcessorStats, consumerStats);
+        return Objects.hash(messageProcessorStats, consumerStats, engineStats);
     }
 
     /**
@@ -154,6 +173,13 @@ public class PollingIngestStats implements Writeable, ToXContentFragment {
     }
 
     /**
+     * Stats for ingestion engine
+     */
+    @ExperimentalApi
+    public record EngineStats(long totalPeriodicFlushCount) {
+    }
+
+    /**
      * Builder for {@link PollingIngestStats}
      */
     @ExperimentalApi
@@ -171,6 +197,7 @@ public class PollingIngestStats implements Writeable, ToXContentFragment {
         private long totalPollerMessageDroppedCount;
         private long totalDuplicateMessageSkippedCount;
         private long pointerBasedLag;
+        private long totalPeriodicFlushCount;
 
         public Builder() {}
 
@@ -243,6 +270,11 @@ public class PollingIngestStats implements Writeable, ToXContentFragment {
             return this;
         }
 
+        public Builder setTotalPeriodicFlushCount(long totalPeriodicFlushCount) {
+            this.totalPeriodicFlushCount = totalPeriodicFlushCount;
+            return this;
+        }
+
         public PollingIngestStats build() {
             MessageProcessorStats messageProcessorStats = new MessageProcessorStats(
                 totalProcessedCount,
@@ -261,7 +293,8 @@ public class PollingIngestStats implements Writeable, ToXContentFragment {
                 totalDuplicateMessageSkippedCount,
                 pointerBasedLag
             );
-            return new PollingIngestStats(messageProcessorStats, consumerStats);
+            EngineStats engineStats = new EngineStats(totalPeriodicFlushCount);
+            return new PollingIngestStats(messageProcessorStats, consumerStats, engineStats);
         }
     }
 

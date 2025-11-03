@@ -10,6 +10,7 @@ package org.opensearch.index.engine;
 
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.Term;
+import org.apache.lucene.store.AlreadyClosedException;
 import org.opensearch.ExceptionsHelper;
 import org.opensearch.OpenSearchException;
 import org.opensearch.action.admin.indices.streamingingestion.state.ShardIngestionState;
@@ -19,8 +20,13 @@ import org.opensearch.cluster.metadata.IngestionSource;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.lease.Releasable;
 import org.opensearch.common.lucene.uid.Versions;
+import org.opensearch.common.metrics.CounterMetric;
+import org.opensearch.common.unit.TimeValue;
+import org.opensearch.common.util.concurrent.AbstractRunnable;
 import org.opensearch.common.util.concurrent.ReleasableLock;
 import org.opensearch.core.common.Strings;
+import org.opensearch.threadpool.Scheduler;
+import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.index.IngestionConsumerFactory;
 import org.opensearch.index.IngestionShardPointer;
 import org.opensearch.index.VersionType;
@@ -62,10 +68,32 @@ public class IngestionEngine extends InternalEngine {
     private final IngestionConsumerFactory ingestionConsumerFactory;
     private final DocumentMapperForType documentMapperForType;
 
+    // Track last successful commit time and pointer to only run periodic flush if batchStartPointer is stale
+    private volatile long lastCommitTimeMillis;
+    private volatile IngestionShardPointer lastCommittedBatchStartPointer;
+
+    // Scheduler for periodic flush checks
+    private volatile Scheduler.Cancellable periodicFlushScheduler;
+
+    // Periodic flush configuration
+    private volatile TimeValue periodicFlushCheckInterval;
+    private volatile TimeValue periodicFlushThreshold;
+
+    // Metric for tracking periodic flushes
+    private final CounterMetric periodicFlushMetric = new CounterMetric();
+
     public IngestionEngine(EngineConfig engineConfig, IngestionConsumerFactory ingestionConsumerFactory) {
         super(engineConfig);
         this.ingestionConsumerFactory = Objects.requireNonNull(ingestionConsumerFactory);
         this.documentMapperForType = engineConfig.getDocumentMapperForTypeSupplier().get();
+        this.lastCommitTimeMillis = System.currentTimeMillis();
+
+        // Load initial periodic flush configuration from ingestion source
+        IndexMetadata indexMetadata = engineConfig.getIndexSettings().getIndexMetadata();
+        IngestionSource ingestionSource = Objects.requireNonNull(indexMetadata).getIngestionSource();
+        this.periodicFlushCheckInterval = ingestionSource.getPeriodicFlushCheckInterval();
+        this.periodicFlushThreshold = ingestionSource.getPeriodicFlushThreshold();
+
         registerDynamicIndexSettingsHandlers();
     }
 
@@ -74,6 +102,7 @@ public class IngestionEngine extends InternalEngine {
      */
     public void start() {
         initializeStreamPoller(null, null, null);
+        schedulePeriodicFlush();
     }
 
     private void initializeStreamPoller(
@@ -170,6 +199,73 @@ public class IngestionEngine extends InternalEngine {
         if (engineConfig.getClusterApplierService() != null) {
             engineConfig.getClusterApplierService().removeListener(streamPoller);
         }
+    }
+
+    /**
+     * Schedule a periodic check to flush if batchStartPointer is stale.
+     * Checks for the duration since last successful commit to decide if a new flush/commit is required. This ensures
+     * the batchStartPointer is not stale helping with shard recovery.
+     */
+    private void schedulePeriodicFlush() {
+        if (periodicFlushScheduler != null) {
+            periodicFlushScheduler.cancel();
+        }
+
+        periodicFlushScheduler = engineConfig.getThreadPool().scheduleWithFixedDelay(new AbstractRunnable() {
+            @Override
+            public void onFailure(Exception e) {
+                // Log the error and retry on next interval
+                if (isClosed.get() == false) {
+                    logger.warn(
+                        "Failed to execute periodic flush check for ingestion engine shard [{}]. Will retry on next interval.",
+                        shardId,
+                        e
+                    );
+                }
+            }
+
+            @Override
+            protected void doRun() {
+                if (isClosed.get()) {
+                    return;
+                }
+
+                try {
+                    // Check if flush is needed
+                    if (shouldPeriodicallyFlush()) {
+                        logger.info(
+                            "Attempting periodic flush for ingestion engine shard [{}]",
+                            shardId
+                        );
+
+                        // Trigger non-forced, non-blocking flush
+                        flush(false, false);
+                        
+                        // Increment periodic flush metric after successful flush
+                        periodicFlushMetric.inc();
+
+                        logger.debug("Periodic flush completed successfully for shard [{}]", shardId);
+                    } else {
+                        logger.trace(
+                            "Skipping periodic flush for ingestion engine shard [{}]. Not needed yet.",
+                            shardId
+                        );
+                    }
+                } catch (AlreadyClosedException e) {
+                    // Shard is closing
+                    logger.trace("Shard [{}] is closed, skipping periodic flush check", shardId);
+                } catch (Exception e) {
+                    throw e;
+                }
+            }
+        }, periodicFlushCheckInterval, ThreadPool.Names.FLUSH);
+
+        logger.info(
+            "Scheduled periodic flush checks for ingestion engine shard [{}] with check interval [{}] and commit threshold [{}]",
+            shardId,
+            periodicFlushCheckInterval,
+            periodicFlushThreshold
+        );
     }
 
     @Override
@@ -345,6 +441,9 @@ public class IngestionEngine extends InternalEngine {
     protected void commitIndexWriter(final IndexWriter writer, final String translogUUID) throws IOException {
         try {
             final long localCheckpoint = localCheckpointTracker.getProcessedCheckpoint();
+            // Capture batch start pointer once before commit
+            final IngestionShardPointer batchStartPointer = streamPoller.getBatchStartPointer();
+
             writer.setLiveCommitData(() -> {
                 /*
                  * The user data captured above (e.g. local checkpoint) contains data that must be evaluated *before* Lucene flushes
@@ -368,8 +467,8 @@ public class IngestionEngine extends InternalEngine {
                  * Batch start pointer can be null at index creation time, if flush is called before the stream
                  * poller has been completely initialized.
                  */
-                if (streamPoller.getBatchStartPointer() != null) {
-                    commitData.put(StreamPoller.BATCH_START, streamPoller.getBatchStartPointer().asString());
+                if (batchStartPointer != null) {
+                    commitData.put(StreamPoller.BATCH_START, batchStartPointer.asString());
                 } else {
                     logger.warn("ignore null batch start pointer");
                 }
@@ -382,6 +481,17 @@ public class IngestionEngine extends InternalEngine {
             });
             shouldPeriodicallyFlushAfterBigMerge.set(false);
             writer.commit();
+
+            // Update last commit time and pointer after successful commit
+            lastCommitTimeMillis = System.currentTimeMillis();
+            lastCommittedBatchStartPointer = batchStartPointer;
+            logger.debug(
+                "Updated last commit time for shard [{}] to {} with batchStartPointer [{}]",
+                shardId,
+                lastCommitTimeMillis,
+                lastCommittedBatchStartPointer != null ? lastCommittedBatchStartPointer.asString() : "null"
+            );
+
         } catch (final Exception ex) {
             try {
                 failEngine("lucene commit failed", ex);
@@ -408,6 +518,41 @@ public class IngestionEngine extends InternalEngine {
         }
     }
 
+    /**
+     * Determines if a periodic flush is needed for IngestionEngine based on time since last successful commit
+     * and whether the batchStartPointer has advanced. This ensures batchStartPointer is persisted regularly
+     * for shard recovery, but avoids unnecessary flushes when no new messages have been processed.
+     *
+     * @return true if flush is needed, false otherwise
+     */
+    @Override
+    public boolean shouldPeriodicallyFlush() {
+        ensureOpen();
+
+        // Check if flush needed after big merge
+        if (shouldPeriodicallyFlushAfterBigMerge.get()) {
+            return true;
+        }
+
+        // Get current batch start pointer
+        IngestionShardPointer currentBatchStartPointer = streamPoller.getBatchStartPointer();
+
+        // Skip flush if pointer hasn't changed since last commit
+        if (currentBatchStartPointer != null
+            && currentBatchStartPointer.equals(lastCommittedBatchStartPointer)) {
+            logger.info(
+                "Skipping periodic flush check for shard [{}]: batchStartPointer unchanged [{}]",
+                shardId,
+                currentBatchStartPointer.asString()
+            );
+            return false;
+        }
+
+        // Check if the maximum configured time has elapsed since last commit
+        long timeSinceLastCommitMillis = System.currentTimeMillis() - lastCommitTimeMillis;
+        return timeSinceLastCommitMillis >= periodicFlushThreshold.millis();
+    }
+
     @Override
     public void activateThrottling() {
         // TODO: add this when we have a thread pool for indexing in parallel
@@ -425,6 +570,13 @@ public class IngestionEngine extends InternalEngine {
 
     @Override
     public void close() throws IOException {
+        // Cancel periodic flush scheduler
+        if (periodicFlushScheduler != null) {
+            logger.info("Cancelling periodic flush scheduler for shard [{}]", shardId);
+            periodicFlushScheduler.cancel();
+            periodicFlushScheduler = null;
+        }
+
         if (streamPoller != null) {
             streamPoller.close();
         }
@@ -459,13 +611,27 @@ public class IngestionEngine extends InternalEngine {
 
     @Override
     public PollingIngestStats pollingIngestStats() {
-        return streamPoller.getStats();
+        PollingIngestStats stats = streamPoller.getStats();
+        // Create new stats with engine metrics included
+        return new PollingIngestStats(
+            stats.getMessageProcessorStats(),
+            stats.getConsumerStats(),
+            new PollingIngestStats.EngineStats(periodicFlushMetric.count())
+        );
     }
 
     private void registerDynamicIndexSettingsHandlers() {
         engineConfig.getIndexSettings()
             .getScopedSettings()
             .addSettingsUpdateConsumer(IndexMetadata.INGESTION_SOURCE_ERROR_STRATEGY_SETTING, this::updateErrorHandlingStrategy);
+
+        engineConfig.getIndexSettings()
+            .getScopedSettings()
+            .addSettingsUpdateConsumer(
+                IndexMetadata.INGESTION_SOURCE_PERIODIC_FLUSH_CHECK_INTERVAL_SETTING,
+                IndexMetadata.INGESTION_SOURCE_PERIODIC_FLUSH_THRESHOLD_SETTING,
+                this::updatePeriodicFlushSettings
+            );
     }
 
     /**
@@ -477,6 +643,34 @@ public class IngestionEngine extends InternalEngine {
             engineConfig.getIndexSettings().getIndexMetadata().getIngestionSource().getType()
         );
         streamPoller.updateErrorStrategy(updatedIngestionErrorStrategy);
+    }
+
+    /**
+     * Handler for updating periodic flush settings on dynamic index settings update.
+     * Updates check interval and threshold, and reschedules if the interval changed.
+     */
+    private void updatePeriodicFlushSettings(TimeValue newCheckInterval, TimeValue newThreshold) {
+        boolean intervalChanged = !this.periodicFlushCheckInterval.equals(newCheckInterval);
+        boolean thresholdChanged = !this.periodicFlushThreshold.equals(newThreshold);
+
+        if (intervalChanged || thresholdChanged) {
+            logger.info(
+                "Updating periodic flush settings for shard [{}]: check interval [{}] -> [{}], threshold [{}] -> [{}]",
+                shardId,
+                periodicFlushCheckInterval,
+                newCheckInterval,
+                periodicFlushThreshold,
+                newThreshold
+            );
+
+            this.periodicFlushCheckInterval = newCheckInterval;
+            this.periodicFlushThreshold = newThreshold;
+
+            // Reschedule only if check interval changed
+            if (intervalChanged) {
+                schedulePeriodicFlush();
+            }
+        }
     }
 
     /**

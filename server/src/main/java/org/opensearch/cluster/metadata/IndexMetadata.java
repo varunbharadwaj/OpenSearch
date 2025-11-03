@@ -924,6 +924,31 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
     );
 
     /**
+     * Defines the interval at which the ingestion engine checks if a periodic flush is needed.
+     * This is used to regularly commit the batchStartPointer for replica promotion scenarios.
+     */
+    public static final String SETTING_INGESTION_SOURCE_PERIODIC_FLUSH_CHECK_INTERVAL =
+        "index.ingestion_source.periodic_flush_check_interval";
+    public static final Setting<TimeValue> INGESTION_SOURCE_PERIODIC_FLUSH_CHECK_INTERVAL_SETTING = Setting.positiveTimeSetting(
+        SETTING_INGESTION_SOURCE_PERIODIC_FLUSH_CHECK_INTERVAL,
+        new TimeValue(10, TimeUnit.MINUTES),
+        Property.IndexScope,
+        Property.Dynamic
+    );
+
+    /**
+     * Defines the time threshold for triggering a periodic flush in the ingestion engine.
+     * If no commit has occurred within this duration, a flush will be triggered to persist the batchStartPointer.
+     */
+    public static final String SETTING_INGESTION_SOURCE_PERIODIC_FLUSH_THRESHOLD = "index.ingestion_source.periodic_flush_threshold";
+    public static final Setting<TimeValue> INGESTION_SOURCE_PERIODIC_FLUSH_THRESHOLD_SETTING = Setting.positiveTimeSetting(
+        SETTING_INGESTION_SOURCE_PERIODIC_FLUSH_THRESHOLD,
+        new TimeValue(1, TimeUnit.HOURS),
+        Property.IndexScope,
+        Property.Dynamic
+    );
+
+    /**
      * Defines if all-active pull-based ingestion is enabled. In this mode, replicas will directly consume from the
      * streaming source and process the updates. In the default document replication mode, this setting must be enabled.
      * This mode is currently not supported with segment replication.
@@ -1228,6 +1253,8 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
             final int blockingQueueSize = INGESTION_SOURCE_INTERNAL_QUEUE_SIZE_SETTING.get(settings);
             final boolean allActiveIngestionEnabled = INGESTION_SOURCE_ALL_ACTIVE_INGESTION_SETTING.get(settings);
             final TimeValue pointerBasedLagUpdateInterval = INGESTION_SOURCE_POINTER_BASED_LAG_UPDATE_INTERVAL_SETTING.get(settings);
+            final TimeValue periodicFlushCheckInterval = INGESTION_SOURCE_PERIODIC_FLUSH_CHECK_INTERVAL_SETTING.get(settings);
+            final TimeValue periodicFlushThreshold = INGESTION_SOURCE_PERIODIC_FLUSH_THRESHOLD_SETTING.get(settings);
 
             return new IngestionSource.Builder(ingestionSourceType).setParams(ingestionSourceParams)
                 .setPointerInitReset(pointerInitReset)
@@ -1238,6 +1265,8 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
                 .setBlockingQueueSize(blockingQueueSize)
                 .setAllActiveIngestion(allActiveIngestionEnabled)
                 .setPointerBasedLagUpdateInterval(pointerBasedLagUpdateInterval)
+                .setPeriodicFlushCheckInterval(periodicFlushCheckInterval)
+                .setPeriodicFlushThreshold(periodicFlushThreshold)
                 .build();
         }
         return null;

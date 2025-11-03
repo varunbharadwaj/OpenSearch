@@ -808,6 +808,63 @@ public class RemoteStoreKafkaIT extends KafkaIngestionBaseIT {
         });
     }
 
+    public void testReplicaPromotionWithoutFlush() throws Exception {
+        // Step 1: Create 2 nodes with segment replication index (1 shard, 1 replica)
+        internalCluster().startClusterManagerOnlyNode();
+        final String nodeA = internalCluster().startDataOnlyNode();
+
+        createIndexWithDefaultSettings(1, 1);
+        ensureYellowAndNoInitializingShards(indexName);
+        final String nodeB = internalCluster().startDataOnlyNode();
+        ensureGreen(indexName);
+        assertTrue(nodeA.equals(primaryNodeName(indexName)));
+        assertTrue(nodeB.equals(replicaNodeName(indexName)));
+
+        // Step 2: Publish 10 messages with versions and trigger a flush
+        for (int i = 0; i < 10; i++) {
+            produceDataWithExternalVersion(String.valueOf(i), i + 1, "name" + i, "30", defaultMessageTimestamp, "index");
+        }
+
+        // Step 3: Ensure 10 messages are visible on both primary and replica
+        waitForSearchableDocs(10, Arrays.asList(nodeA, nodeB));
+        flush(indexName);
+
+        // Step 4: Do not call refresh or flush from this point onwards
+
+        // Step 5: Publish 9 more messages with versions and wait for them to be visible on both primary and replica
+        // (they will be visible through automatic refresh every 1 second)
+        for (int i = 10; i < 19; i++) {
+            produceDataWithExternalVersion(String.valueOf(i), i + 1, "name" + i, "30", defaultMessageTimestamp, "index");
+        }
+        waitForSearchableDocs(19, Arrays.asList(nodeA, nodeB));
+
+        // Step 6: Stop the primary shard node so that replica is promoted to primary
+        internalCluster().stopRandomNode(InternalTestCluster.nameFilter(nodeA));
+        ensureYellowAndNoInitializingShards(indexName);
+        assertTrue(nodeB.equals(primaryNodeName(indexName)));
+
+        // Step 7: Publish a new message with version and wait till it's visible on the new primary (total 20 messages)
+        produceDataWithExternalVersion("19", 20, "name19", "30", defaultMessageTimestamp, "index");
+        waitForSearchableDocs(20, Arrays.asList(nodeB));
+
+        // Verify the new primary processed the new message
+        RangeQueryBuilder query = new RangeQueryBuilder("age").gte(0);
+        SearchResponse response = client(nodeB).prepareSearch(indexName).setQuery(query).setPreference("_only_local").get();
+        assertThat(response.getHits().getTotalHits().value(), is(20L));
+
+        // Check polling stats to understand re-ingestion behavior
+        PollingIngestStats stats = client(nodeB).admin().indices().prepareStats(indexName).get().getIndex(indexName).getShards()[0]
+            .getPollingIngestStats();
+
+        // If batch_start pointer is stale, the new primary will re-ingest messages from offset 10 onwards
+        // With external versioning, duplicate messages will be rejected (version conflicts)
+        // Expected if pointer is stale: totalPolledCount ~= 10 (messages 10-19), totalVersionConflictsCount ~= 9
+        // Expected if pointer is current: totalPolledCount ~= 1 (only message 19), totalVersionConflictsCount = 0
+        logger.info("Total processed count: {}", stats.getMessageProcessorStats().totalProcessedCount());
+        logger.info("Total version conflicts: {}", stats.getMessageProcessorStats().totalVersionConflictsCount());
+        logger.info("Total polled count: {}", stats.getConsumerStats().totalPolledCount());
+    }
+
     private void verifyRemoteStoreEnabled(String node) {
         GetSettingsResponse settingsResponse = client(node).admin().indices().prepareGetSettings(indexName).get();
         String remoteStoreEnabled = settingsResponse.getIndexToSettings().get(indexName).get("index.remote_store.enabled");

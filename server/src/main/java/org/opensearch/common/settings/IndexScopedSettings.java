@@ -282,6 +282,8 @@ public final class IndexScopedSettings extends AbstractScopedSettings {
                 IndexMetadata.INGESTION_SOURCE_INTERNAL_QUEUE_SIZE_SETTING,
                 IndexMetadata.INGESTION_SOURCE_ALL_ACTIVE_INGESTION_SETTING,
                 IndexMetadata.INGESTION_SOURCE_POINTER_BASED_LAG_UPDATE_INTERVAL_SETTING,
+                IndexMetadata.INGESTION_SOURCE_PERIODIC_FLUSH_CHECK_INTERVAL_SETTING,
+                IndexMetadata.INGESTION_SOURCE_PERIODIC_FLUSH_THRESHOLD_SETTING,
 
                 // Settings for search replica
                 IndexMetadata.INDEX_NUMBER_OF_SEARCH_REPLICAS_SETTING,

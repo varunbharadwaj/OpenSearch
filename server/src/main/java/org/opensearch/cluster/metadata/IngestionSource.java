@@ -22,6 +22,8 @@ import static org.opensearch.cluster.metadata.IndexMetadata.INGESTION_SOURCE_ALL
 import static org.opensearch.cluster.metadata.IndexMetadata.INGESTION_SOURCE_INTERNAL_QUEUE_SIZE_SETTING;
 import static org.opensearch.cluster.metadata.IndexMetadata.INGESTION_SOURCE_MAX_POLL_SIZE;
 import static org.opensearch.cluster.metadata.IndexMetadata.INGESTION_SOURCE_NUM_PROCESSOR_THREADS_SETTING;
+import static org.opensearch.cluster.metadata.IndexMetadata.INGESTION_SOURCE_PERIODIC_FLUSH_CHECK_INTERVAL_SETTING;
+import static org.opensearch.cluster.metadata.IndexMetadata.INGESTION_SOURCE_PERIODIC_FLUSH_THRESHOLD_SETTING;
 import static org.opensearch.cluster.metadata.IndexMetadata.INGESTION_SOURCE_POINTER_BASED_LAG_UPDATE_INTERVAL_SETTING;
 import static org.opensearch.cluster.metadata.IndexMetadata.INGESTION_SOURCE_POLL_TIMEOUT;
 
@@ -40,6 +42,8 @@ public class IngestionSource {
     private int blockingQueueSize;
     private final boolean allActiveIngestion;
     private final TimeValue pointerBasedLagUpdateInterval;
+    private final TimeValue periodicFlushCheckInterval;
+    private final TimeValue periodicFlushThreshold;
 
     private IngestionSource(
         String type,
@@ -51,7 +55,9 @@ public class IngestionSource {
         int numProcessorThreads,
         int blockingQueueSize,
         boolean allActiveIngestion,
-        TimeValue pointerBasedLagUpdateInterval
+        TimeValue pointerBasedLagUpdateInterval,
+        TimeValue periodicFlushCheckInterval,
+        TimeValue periodicFlushThreshold
     ) {
         this.type = type;
         this.pointerInitReset = pointerInitReset;
@@ -63,6 +69,8 @@ public class IngestionSource {
         this.blockingQueueSize = blockingQueueSize;
         this.allActiveIngestion = allActiveIngestion;
         this.pointerBasedLagUpdateInterval = pointerBasedLagUpdateInterval;
+        this.periodicFlushCheckInterval = periodicFlushCheckInterval;
+        this.periodicFlushThreshold = periodicFlushThreshold;
     }
 
     public String getType() {
@@ -105,6 +113,14 @@ public class IngestionSource {
         return pointerBasedLagUpdateInterval;
     }
 
+    public TimeValue getPeriodicFlushCheckInterval() {
+        return periodicFlushCheckInterval;
+    }
+
+    public TimeValue getPeriodicFlushThreshold() {
+        return periodicFlushThreshold;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
@@ -119,7 +135,9 @@ public class IngestionSource {
             && Objects.equals(numProcessorThreads, ingestionSource.numProcessorThreads)
             && Objects.equals(blockingQueueSize, ingestionSource.blockingQueueSize)
             && Objects.equals(allActiveIngestion, ingestionSource.allActiveIngestion)
-            && Objects.equals(pointerBasedLagUpdateInterval, ingestionSource.pointerBasedLagUpdateInterval);
+            && Objects.equals(pointerBasedLagUpdateInterval, ingestionSource.pointerBasedLagUpdateInterval)
+            && Objects.equals(periodicFlushCheckInterval, ingestionSource.periodicFlushCheckInterval)
+            && Objects.equals(periodicFlushThreshold, ingestionSource.periodicFlushThreshold);
     }
 
     @Override
@@ -134,7 +152,9 @@ public class IngestionSource {
             numProcessorThreads,
             blockingQueueSize,
             allActiveIngestion,
-            pointerBasedLagUpdateInterval
+            pointerBasedLagUpdateInterval,
+            periodicFlushCheckInterval,
+            periodicFlushThreshold
         );
     }
 
@@ -164,6 +184,10 @@ public class IngestionSource {
             + allActiveIngestion
             + ", pointerBasedLagUpdateInterval="
             + pointerBasedLagUpdateInterval
+            + ", periodicFlushCheckInterval="
+            + periodicFlushCheckInterval
+            + ", periodicFlushThreshold="
+            + periodicFlushThreshold
             + '}';
     }
 
@@ -225,6 +249,8 @@ public class IngestionSource {
         private TimeValue pointerBasedLagUpdateInterval = INGESTION_SOURCE_POINTER_BASED_LAG_UPDATE_INTERVAL_SETTING.getDefault(
             Settings.EMPTY
         );
+        private TimeValue periodicFlushCheckInterval = INGESTION_SOURCE_PERIODIC_FLUSH_CHECK_INTERVAL_SETTING.getDefault(Settings.EMPTY);
+        private TimeValue periodicFlushThreshold = INGESTION_SOURCE_PERIODIC_FLUSH_THRESHOLD_SETTING.getDefault(Settings.EMPTY);
 
         public Builder(String type) {
             this.type = type;
@@ -239,6 +265,8 @@ public class IngestionSource {
             this.blockingQueueSize = ingestionSource.blockingQueueSize;
             this.allActiveIngestion = ingestionSource.allActiveIngestion;
             this.pointerBasedLagUpdateInterval = ingestionSource.pointerBasedLagUpdateInterval;
+            this.periodicFlushCheckInterval = ingestionSource.periodicFlushCheckInterval;
+            this.periodicFlushThreshold = ingestionSource.periodicFlushThreshold;
         }
 
         public Builder setPointerInitReset(PointerInitReset pointerInitReset) {
@@ -291,6 +319,16 @@ public class IngestionSource {
             return this;
         }
 
+        public Builder setPeriodicFlushCheckInterval(TimeValue periodicFlushCheckInterval) {
+            this.periodicFlushCheckInterval = periodicFlushCheckInterval;
+            return this;
+        }
+
+        public Builder setPeriodicFlushThreshold(TimeValue periodicFlushThreshold) {
+            this.periodicFlushThreshold = periodicFlushThreshold;
+            return this;
+        }
+
         public IngestionSource build() {
             return new IngestionSource(
                 type,
@@ -302,7 +340,9 @@ public class IngestionSource {
                 numProcessorThreads,
                 blockingQueueSize,
                 allActiveIngestion,
-                pointerBasedLagUpdateInterval
+                pointerBasedLagUpdateInterval,
+                periodicFlushCheckInterval,
+                periodicFlushThreshold
             );
         }
 
