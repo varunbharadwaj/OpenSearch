@@ -894,5 +894,189 @@ public class IngestFromKafkaIT extends KafkaIngestionBaseIT {
         });
 
         waitForSearchableDocs(10, Arrays.asList(nodeA));
+
+        // Step 7: Pause ingestion
+        pauseIngestionAndWait(indexName, 1);
+
+        // Step 8: Publish 10 more messages
+        for (int i = 10; i < 20; i++) {
+            produceDataWithExternalVersion(String.valueOf(i), 1, "name" + i, "25", defaultMessageTimestamp, "index");
+        }
+
+        // Step 9: Update auto.offset.reset back to "latest"
+        client().admin()
+            .indices()
+            .prepareUpdateSettings(indexName)
+            .setSettings(Settings.builder().put("ingestion_source.param.auto.offset.reset", "latest"))
+            .get();
+
+        // Verify the setting was updated
+        autoOffsetReset = getSettings(indexName, "index.ingestion_source.param.auto.offset.reset");
+        assertEquals("latest", autoOffsetReset);
+
+        // Step 10: Verify processed count is still 10
+        PollingIngestStats stats = client(nodeA).admin().indices().prepareStats(indexName).get().getIndex(indexName).getShards()[0]
+            .getPollingIngestStats();
+        assertEquals(10L, stats.getMessageProcessorStats().totalProcessedCount());
+        assertEquals(9L, stats.getMessageProcessorStats().totalVersionConflictsCount());
+
+        // Step 11: Resume ingestion. This does not recreate the poller as consumer is not reset.
+        resumeIngestionAndWait(indexName, 1);
+
+        // Step 12: Wait for processed count to be 21 and version conflict to be 10. On updating the Kafka settings, the
+        // last message (offset=9) is reprocessed resulting in additional version conflict.
+        waitForState(() -> {
+            PollingIngestStats updatedStats = client(nodeA).admin()
+                .indices()
+                .prepareStats(indexName)
+                .get()
+                .getIndex(indexName)
+                .getShards()[0].getPollingIngestStats();
+
+            return updatedStats != null
+                && updatedStats.getMessageProcessorStats().totalProcessedCount() == 21L
+                && updatedStats.getMessageProcessorStats().totalVersionConflictsCount() == 10L;
+        });
+
+        waitForSearchableDocs(20, Arrays.asList(nodeA));
+    }
+
+    public void testConsumerInitializationFailureAndRecovery() throws Exception {
+        // Step 1: Create index with auto.offset.reset=none and pointer.init.reset to offset 100 (invalid offset)
+        // This should cause consumer initialization to fail
+        internalCluster().startClusterManagerOnlyNode();
+        final String nodeA = internalCluster().startDataOnlyNode();
+        createIndex(
+            indexName,
+            Settings.builder()
+                .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+                .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
+                .put("ingestion_source.type", "kafka")
+                .put("ingestion_source.pointer.init.reset", "reset_by_offset")
+                .put("ingestion_source.pointer.init.reset.value", "100")
+                .put("ingestion_source.param.topic", topicName)
+                .put("ingestion_source.param.bootstrap_servers", kafka.getBootstrapServers())
+                .put("ingestion_source.param.auto.offset.reset", "none")
+                .put("ingestion_source.all_active", true)
+                .build(),
+            mapping
+        );
+
+        ensureGreen(indexName);
+
+        // Step 2: Wait for consumer error and paused status
+        waitForState(() -> {
+            GetIngestionStateResponse ingestionState = getIngestionState(indexName);
+            PollingIngestStats stats = client(nodeA).admin().indices().prepareStats(indexName).get().getIndex(indexName).getShards()[0]
+                .getPollingIngestStats();
+
+            return ingestionState.getShardStates().length == 1
+                && ingestionState.getShardStates()[0].isPollerPaused()
+                && stats != null
+                && stats.getConsumerStats().totalConsumerErrorCount() >= 1L;
+        });
+
+        // Step 3: Publish 10 messages
+        for (int i = 0; i < 10; i++) {
+            produceData(Integer.toString(i), "name" + i, "25");
+        }
+
+        // Step 4: Update auto.offset.reset to earliest
+        client().admin()
+            .indices()
+            .prepareUpdateSettings(indexName)
+            .setSettings(Settings.builder().put("ingestion_source.param.auto.offset.reset", "earliest"))
+            .get();
+
+        // Verify the setting was updated
+        String autoOffsetReset = getSettings(indexName, "index.ingestion_source.param.auto.offset.reset");
+        assertEquals("earliest", autoOffsetReset);
+
+        // Step 5: Resume ingestion and wait for 10 searchable docs
+        resumeIngestionAndWait(indexName, 1);
+
+        waitForSearchableDocs(10, Arrays.asList(nodeA));
+
+        // Verify all 10 messages were processed
+        PollingIngestStats stats = client(nodeA).admin().indices().prepareStats(indexName).get().getIndex(indexName).getShards()[0]
+            .getPollingIngestStats();
+        assertEquals(10L, stats.getMessageProcessorStats().totalProcessedCount());
+
+        // Step 6: Update auto.offset.reset to earliest again. Consumer must not be reinitialized again as no config change.
+        client().admin()
+            .indices()
+            .prepareUpdateSettings(indexName)
+            .setSettings(Settings.builder().put("ingestion_source.param.auto.offset.reset", "earliest"))
+            .get();
+
+        // Step 7: Publish 1 more message
+        produceData("10", "name10", "30");
+
+        // Step 8: Wait for 11 searchable docs
+        waitForSearchableDocs(11, Arrays.asList(nodeA));
+
+        // Step 9: Verify total processed message count is 11
+        PollingIngestStats finalStats = client(nodeA).admin().indices().prepareStats(indexName).get().getIndex(indexName).getShards()[0]
+            .getPollingIngestStats();
+        assertEquals(11L, finalStats.getMessageProcessorStats().totalProcessedCount());
+    }
+
+    public void testDynamicConfigUpdateOnNoMessages() throws Exception {
+        // Step 1: Create index with pointer.init.reset to offset 100 and auto.offset.reset to earliest
+        // Since offset 100 doesn't exist, it will fall back to earliest (offset 0)
+        internalCluster().startClusterManagerOnlyNode();
+        final String nodeA = internalCluster().startDataOnlyNode();
+        createIndex(
+            indexName,
+            Settings.builder()
+                .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+                .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
+                .put("ingestion_source.type", "kafka")
+                .put("ingestion_source.pointer.init.reset", "reset_by_offset")
+                .put("ingestion_source.pointer.init.reset.value", "100")
+                .put("ingestion_source.param.topic", topicName)
+                .put("ingestion_source.param.bootstrap_servers", kafka.getBootstrapServers())
+                .put("ingestion_source.param.auto.offset.reset", "earliest")
+                .put("ingestion_source.all_active", true)
+                .build(),
+            mapping
+        );
+
+        ensureGreen(indexName);
+
+        // Step 2: Wait for poller state to be polling
+        waitForState(() -> {
+            GetIngestionStateResponse ingestionState = getIngestionState(indexName);
+            return ingestionState.getShardStates().length == 1
+                && ingestionState.getShardStates()[0].getPollerState().equalsIgnoreCase("polling");
+        });
+
+        // Step 3: Pause ingestion
+        pauseIngestionAndWait(indexName, 1);
+
+        // Step 4: Update auto.offset.reset to latest. This is surrounded by pause/resume to indirectly infer the config change has been
+        // applied.
+        client().admin()
+            .indices()
+            .prepareUpdateSettings(indexName)
+            .setSettings(Settings.builder().put("ingestion_source.param.auto.offset.reset", "latest"))
+            .get();
+
+        // Verify the setting was updated
+        String autoOffsetReset = getSettings(indexName, "index.ingestion_source.param.auto.offset.reset");
+        assertEquals("latest", autoOffsetReset);
+
+        // Step 5: Resume ingestion
+        resumeIngestionAndWait(indexName, 1);
+
+        // Step 6: Publish 1 message and wait for it to be searchable
+        produceData("1", "name1", "25");
+
+        waitForSearchableDocs(1, Arrays.asList(nodeA));
+
+        // Verify 1 message was processed
+        PollingIngestStats stats = client(nodeA).admin().indices().prepareStats(indexName).get().getIndex(indexName).getShards()[0]
+            .getPollingIngestStats();
+        assertEquals(1L, stats.getMessageProcessorStats().totalProcessedCount());
     }
 }
