@@ -143,6 +143,19 @@ public final class RemoteClusterService extends RemoteClusterAware implements Cl
         )
     );
 
+    /**
+     * If <code>true</code>, enables lazy reconnection optimization for remote cluster connections.
+     * When enabled, partial seed updates (where at least one seed remains the same) will not
+     * trigger a full reconnection if already connected to the remote cluster.
+     * Only when ALL seeds are replaced will the connection be rebuilt.
+     * The default is <code>false</code> to maintain backward compatibility.
+     */
+    public static final Setting.AffixSetting<Boolean> REMOTE_CLUSTER_LAZY_RECONNECTION = Setting.affixKeySetting(
+        "cluster.remote.",
+        "lazy_reconnection",
+        (ns, key) -> boolSetting(key, false, new RemoteConnectionEnabled<>(ns, key), Setting.Property.Dynamic, Setting.Property.NodeScope)
+    );
+
     private final boolean enabled;
 
     public boolean isEnabled() {

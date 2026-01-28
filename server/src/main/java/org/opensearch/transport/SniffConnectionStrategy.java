@@ -144,12 +144,27 @@ public class SniffConnectionStrategy extends RemoteConnectionStrategy {
     private static final Predicate<DiscoveryNode> DEFAULT_NODE_PREDICATE = (node) -> Version.CURRENT.isCompatible(node.getVersion())
         && (node.isClusterManagerNode() == false || node.isDataNode() || node.isIngestNode());
 
-    private final List<String> configuredSeedNodes;
-    private final List<Supplier<DiscoveryNode>> seedNodes;
+    /**
+     * Immutable holder for seed configuration to ensure atomic updates.
+     * When lazy_reconnection is enabled, seeds can be updated without rebuilding connections.
+     */
+    private static class SeedConfig {
+        final List<String> configuredSeedNodes;
+        final List<Supplier<DiscoveryNode>> seedNodes;
+
+        SeedConfig(List<String> configuredSeedNodes, List<Supplier<DiscoveryNode>> seedNodes) {
+            this.configuredSeedNodes = configuredSeedNodes;
+            this.seedNodes = seedNodes;
+        }
+    }
+
+    // Single volatile reference for atomic seed updates
+    private volatile SeedConfig seedConfig;
     private final int maxNumRemoteConnections;
     private final Predicate<DiscoveryNode> nodePredicate;
     private final SetOnce<ClusterName> remoteClusterName = new SetOnce<>();
     private final String proxyAddress;
+    private final boolean lazyReconnectionEnabled;
 
     SniffConnectionStrategy(
         String clusterAlias,
@@ -165,10 +180,14 @@ public class SniffConnectionStrategy extends RemoteConnectionStrategy {
             settings,
             REMOTE_NODE_CONNECTIONS.getConcreteSettingForNamespace(clusterAlias).get(settings),
             getNodePredicate(settings),
-            REMOTE_CLUSTER_SEEDS.getConcreteSettingForNamespace(clusterAlias).get(settings)
+            REMOTE_CLUSTER_SEEDS.getConcreteSettingForNamespace(clusterAlias).get(settings),
+            RemoteClusterService.REMOTE_CLUSTER_LAZY_RECONNECTION.getConcreteSettingForNamespace(clusterAlias).get(settings)
         );
     }
 
+    /**
+     * Constructor with default lazyReconnectionEnabled = false for backward compatibility.
+     */
     SniffConnectionStrategy(
         String clusterAlias,
         TransportService transportService,
@@ -188,9 +207,7 @@ public class SniffConnectionStrategy extends RemoteConnectionStrategy {
             maxNumRemoteConnections,
             nodePredicate,
             configuredSeedNodes,
-            configuredSeedNodes.stream()
-                .map(seedAddress -> (Supplier<DiscoveryNode>) () -> resolveSeedNode(clusterAlias, seedAddress, proxyAddress))
-                .collect(Collectors.toList())
+            false // default lazyReconnectionEnabled to false
         );
     }
 
@@ -203,14 +220,70 @@ public class SniffConnectionStrategy extends RemoteConnectionStrategy {
         int maxNumRemoteConnections,
         Predicate<DiscoveryNode> nodePredicate,
         List<String> configuredSeedNodes,
+        boolean lazyReconnectionEnabled
+    ) {
+        this(
+            clusterAlias,
+            transportService,
+            connectionManager,
+            proxyAddress,
+            settings,
+            maxNumRemoteConnections,
+            nodePredicate,
+            configuredSeedNodes,
+            configuredSeedNodes.stream()
+                .map(seedAddress -> (Supplier<DiscoveryNode>) () -> resolveSeedNode(clusterAlias, seedAddress, proxyAddress))
+                .collect(Collectors.toList()),
+            lazyReconnectionEnabled
+        );
+    }
+
+    /**
+     * Constructor with default lazyReconnectionEnabled = false for backward compatibility.
+     */
+    SniffConnectionStrategy(
+        String clusterAlias,
+        TransportService transportService,
+        RemoteConnectionManager connectionManager,
+        String proxyAddress,
+        Settings settings,
+        int maxNumRemoteConnections,
+        Predicate<DiscoveryNode> nodePredicate,
+        List<String> configuredSeedNodes,
         List<Supplier<DiscoveryNode>> seedNodes
+    ) {
+        this(
+            clusterAlias,
+            transportService,
+            connectionManager,
+            proxyAddress,
+            settings,
+            maxNumRemoteConnections,
+            nodePredicate,
+            configuredSeedNodes,
+            seedNodes,
+            false // default lazyReconnectionEnabled to false
+        );
+    }
+
+    SniffConnectionStrategy(
+        String clusterAlias,
+        TransportService transportService,
+        RemoteConnectionManager connectionManager,
+        String proxyAddress,
+        Settings settings,
+        int maxNumRemoteConnections,
+        Predicate<DiscoveryNode> nodePredicate,
+        List<String> configuredSeedNodes,
+        List<Supplier<DiscoveryNode>> seedNodes,
+        boolean lazyReconnectionEnabled
     ) {
         super(clusterAlias, transportService, connectionManager, settings);
         this.proxyAddress = proxyAddress;
         this.maxNumRemoteConnections = maxNumRemoteConnections;
         this.nodePredicate = nodePredicate;
-        this.configuredSeedNodes = configuredSeedNodes;
-        this.seedNodes = seedNodes;
+        this.seedConfig = new SeedConfig(configuredSeedNodes, seedNodes);
+        this.lazyReconnectionEnabled = lazyReconnectionEnabled;
     }
 
     static Stream<Setting.AffixSetting<?>> enablementSettings() {
@@ -229,11 +302,93 @@ public class SniffConnectionStrategy extends RemoteConnectionStrategy {
     @Override
     protected boolean strategyMustBeRebuilt(Settings newSettings) {
         String proxy = REMOTE_CLUSTERS_PROXY.getConcreteSettingForNamespace(clusterAlias).get(newSettings);
-        List<String> addresses = REMOTE_CLUSTER_SEEDS.getConcreteSettingForNamespace(clusterAlias).get(newSettings);
+        List<String> newAddresses = REMOTE_CLUSTER_SEEDS.getConcreteSettingForNamespace(clusterAlias).get(newSettings);
         int nodeConnections = REMOTE_NODE_CONNECTIONS.getConcreteSettingForNamespace(clusterAlias).get(newSettings);
-        return nodeConnections != maxNumRemoteConnections
-            || seedsChanged(configuredSeedNodes, addresses)
-            || proxyChanged(proxyAddress, proxy);
+
+        // Always rebuild if node_connections changed or proxy changed
+        if (nodeConnections != maxNumRemoteConnections || proxyChanged(proxyAddress, proxy)) {
+            return true;
+        }
+
+        // Capture current seed config for consistent reads
+        final SeedConfig currentConfig = this.seedConfig;
+
+        // If seeds haven't changed at all, no rebuild needed
+        if (seedsChanged(currentConfig.configuredSeedNodes, newAddresses) == false) {
+            return false;
+        }
+
+        // Seeds changed - if lazy_reconnection is disabled, use original behavior (always rebuild)
+        if (lazyReconnectionEnabled == false) {
+            logger.debug("[{}] seed nodes changed and lazy_reconnection is disabled - rebuilding connection", clusterAlias);
+            return true;
+        }
+
+        // Lazy rebuild is enabled - check if we should rebuild or just update
+        boolean isConnected = remoteClusterName.get() != null && connectionManager.size() > 0;
+
+        if (isConnected) {
+            // Already connected to a remote cluster
+            // Only rebuild if ALL seeds are different (might be a different cluster)
+            boolean allSeedsChanged = areAllSeedsDifferent(currentConfig.configuredSeedNodes, newAddresses);
+
+            if (allSeedsChanged) {
+                logger.info(
+                    "[{}] all seed nodes changed from {} to {} - rebuilding connection as this might be a different cluster",
+                    clusterAlias,
+                    currentConfig.configuredSeedNodes,
+                    newAddresses
+                );
+                return true;
+            } else {
+                // Partial seed change while connected - just update seeds, don't rebuild
+                logger.info(
+                    "[{}] seed nodes updated from {} to {} - updating seeds without rebuilding (lazy_reconnection enabled, already connected to cluster: {})",
+                    clusterAlias,
+                    currentConfig.configuredSeedNodes,
+                    newAddresses,
+                    remoteClusterName.get()
+                );
+                updateSeeds(newAddresses);
+                return false;
+            }
+        } else {
+            // Not connected yet - rebuild to try new seeds
+            logger.debug("[{}] seed nodes changed and not yet connected - rebuilding to try new seeds", clusterAlias);
+            return true;
+        }
+    }
+
+    /**
+     * Updates the configured seed nodes without rebuilding the connection.
+     * This is used when seeds are partially updated but we're already connected.
+     * Uses immutable SeedConfig for atomic update.
+     */
+    private void updateSeeds(List<String> newSeedAddresses) {
+        List<Supplier<DiscoveryNode>> newSeedNodes = newSeedAddresses.stream()
+            .map(seedAddress -> (Supplier<DiscoveryNode>) () -> resolveSeedNode(clusterAlias, seedAddress, proxyAddress))
+            .collect(Collectors.toList());
+        // Atomic single write - both fields updated together
+        this.seedConfig = new SeedConfig(newSeedAddresses, newSeedNodes);
+    }
+
+    /**
+     * Returns true if all seeds in the new list are different from the old list.
+     * This indicates a potential cluster change.
+     */
+    private boolean areAllSeedsDifferent(List<String> oldSeeds, List<String> newSeeds) {
+        if (oldSeeds.isEmpty() || newSeeds.isEmpty()) {
+            return true; // Edge case: treat empty lists as "all different"
+        }
+        Set<String> oldSet = new HashSet<>(oldSeeds);
+        Set<String> newSet = new HashSet<>(newSeeds);
+        // Check if there's ANY overlap between old and new seeds
+        for (String newSeed : newSet) {
+            if (oldSet.contains(newSeed)) {
+                return false; // Found at least one common seed
+            }
+        }
+        return true; // No common seeds - all are different
     }
 
     @Override
@@ -243,12 +398,12 @@ public class SniffConnectionStrategy extends RemoteConnectionStrategy {
 
     @Override
     protected void connectImpl(ActionListener<Void> listener) {
-        collectRemoteNodes(seedNodes.iterator(), listener);
+        collectRemoteNodes(seedConfig.seedNodes.iterator(), listener);
     }
 
     @Override
     protected RemoteConnectionInfo.ModeInfo getModeInfo() {
-        return new SniffModeInfo(configuredSeedNodes, maxNumRemoteConnections, connectionManager.size());
+        return new SniffModeInfo(seedConfig.configuredSeedNodes, maxNumRemoteConnections, connectionManager.size());
     }
 
     private void collectRemoteNodes(Iterator<Supplier<DiscoveryNode>> seedNodes, ActionListener<Void> listener) {

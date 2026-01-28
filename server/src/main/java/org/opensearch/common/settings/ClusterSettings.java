@@ -454,6 +454,7 @@ public final class ClusterSettings extends AbstractScopedSettings {
                 RemoteClusterService.ENABLE_REMOTE_CLUSTERS,
                 RemoteClusterService.REMOTE_CLUSTER_PING_SCHEDULE,
                 RemoteClusterService.REMOTE_CLUSTER_COMPRESS,
+                RemoteClusterService.REMOTE_CLUSTER_LAZY_RECONNECTION,
                 RemoteConnectionStrategy.REMOTE_CONNECTION_MODE,
                 ProxyConnectionStrategy.PROXY_ADDRESS,
                 ProxyConnectionStrategy.REMOTE_SOCKET_CONNECTIONS,

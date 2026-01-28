@@ -1017,4 +1017,262 @@ public class SniffConnectionStrategyTests extends OpenSearchTestCase {
     private static List<String> seedNodes(final DiscoveryNode... seedNodes) {
         return Arrays.stream(seedNodes).map(s -> s.getAddress().toString()).collect(Collectors.toList());
     }
+
+    public void testLazyReconnectionDisabled_RebuildOnPartialSeedChange() {
+        List<DiscoveryNode> knownNodes = new CopyOnWriteArrayList<>();
+        try (
+            MockTransportService seedTransport1 = startTransport("seed_node_1", knownNodes, Version.CURRENT);
+            MockTransportService seedTransport2 = startTransport("seed_node_2", knownNodes, Version.CURRENT);
+            MockTransportService seedTransport3 = startTransport("seed_node_3", knownNodes, Version.CURRENT)
+        ) {
+            DiscoveryNode seedNode1 = seedTransport1.getLocalNode();
+            DiscoveryNode seedNode2 = seedTransport2.getLocalNode();
+            DiscoveryNode seedNode3 = seedTransport3.getLocalNode();
+            knownNodes.add(seedNode1);
+            knownNodes.add(seedNode2);
+            knownNodes.add(seedNode3);
+
+            try (
+                MockTransportService localService = MockTransportService.createNewService(
+                    Settings.EMPTY,
+                    Version.CURRENT,
+                    threadPool,
+                    NoopTracer.INSTANCE
+                )
+            ) {
+                localService.start();
+                localService.acceptIncomingRequests();
+
+                ClusterConnectionManager connectionManager = new ClusterConnectionManager(profile, localService.transport);
+                try (
+                    RemoteConnectionManager remoteConnectionManager = new RemoteConnectionManager(clusterAlias, connectionManager);
+                    SniffConnectionStrategy strategy = new SniffConnectionStrategy(
+                        clusterAlias,
+                        localService,
+                        remoteConnectionManager,
+                        null,
+                        Settings.EMPTY,
+                        3,
+                        n -> true,
+                        seedNodes(seedNode1, seedNode2),
+                        false // lazyReconnectionEnabled = false
+                    )
+                ) {
+                    PlainActionFuture<Void> connectFuture = PlainActionFuture.newFuture();
+                    strategy.connect(connectFuture);
+                    connectFuture.actionGet();
+
+                    assertTrue(connectionManager.nodeConnected(seedNode1));
+                    assertTrue(connectionManager.nodeConnected(seedNode2));
+                    assertTrue(strategy.assertNoRunningConnections());
+
+                    // Change one seed (partial change) - with lazyReconnection disabled, should rebuild
+                    Setting<?> seedSetting = SniffConnectionStrategy.REMOTE_CLUSTER_SEEDS.getConcreteSettingForNamespace(clusterAlias);
+                    Settings partialSeedChange = Settings.builder()
+                        .put(seedSetting.getKey(), Strings.arrayToCommaDelimitedString(seedNodes(seedNode1, seedNode3).toArray()))
+                        .build();
+
+                    // With lazy_reconnection disabled, any seed change should trigger rebuild
+                    assertTrue(
+                        "Should rebuild when lazy_reconnection is disabled and seeds change",
+                        strategy.shouldRebuildConnection(partialSeedChange)
+                    );
+                }
+            }
+        }
+    }
+
+    public void testLazyReconnectionEnabled_NoRebuildOnPartialSeedChange() {
+        List<DiscoveryNode> knownNodes = new CopyOnWriteArrayList<>();
+        try (
+            MockTransportService seedTransport1 = startTransport("seed_node_1", knownNodes, Version.CURRENT);
+            MockTransportService seedTransport2 = startTransport("seed_node_2", knownNodes, Version.CURRENT);
+            MockTransportService seedTransport3 = startTransport("seed_node_3", knownNodes, Version.CURRENT)
+        ) {
+            DiscoveryNode seedNode1 = seedTransport1.getLocalNode();
+            DiscoveryNode seedNode2 = seedTransport2.getLocalNode();
+            DiscoveryNode seedNode3 = seedTransport3.getLocalNode();
+            knownNodes.add(seedNode1);
+            knownNodes.add(seedNode2);
+            knownNodes.add(seedNode3);
+
+            try (
+                MockTransportService localService = MockTransportService.createNewService(
+                    Settings.EMPTY,
+                    Version.CURRENT,
+                    threadPool,
+                    NoopTracer.INSTANCE
+                )
+            ) {
+                localService.start();
+                localService.acceptIncomingRequests();
+
+                ClusterConnectionManager connectionManager = new ClusterConnectionManager(profile, localService.transport);
+                try (
+                    RemoteConnectionManager remoteConnectionManager = new RemoteConnectionManager(clusterAlias, connectionManager);
+                    SniffConnectionStrategy strategy = new SniffConnectionStrategy(
+                        clusterAlias,
+                        localService,
+                        remoteConnectionManager,
+                        null,
+                        Settings.EMPTY,
+                        3,
+                        n -> true,
+                        seedNodes(seedNode1, seedNode2),
+                        true // lazyReconnectionEnabled = true
+                    )
+                ) {
+                    PlainActionFuture<Void> connectFuture = PlainActionFuture.newFuture();
+                    strategy.connect(connectFuture);
+                    connectFuture.actionGet();
+
+                    assertTrue(connectionManager.nodeConnected(seedNode1));
+                    assertTrue(connectionManager.nodeConnected(seedNode2));
+                    assertTrue(strategy.assertNoRunningConnections());
+
+                    // Change one seed (partial change) - with lazyReconnection enabled, should NOT rebuild
+                    // because we're still connected and at least one seed remains the same
+                    Setting<?> seedSetting = SniffConnectionStrategy.REMOTE_CLUSTER_SEEDS.getConcreteSettingForNamespace(clusterAlias);
+                    Settings partialSeedChange = Settings.builder()
+                        .put(seedSetting.getKey(), Strings.arrayToCommaDelimitedString(seedNodes(seedNode1, seedNode3).toArray()))
+                        .build();
+
+                    // With lazy_reconnection enabled and already connected, partial seed change should NOT rebuild
+                    assertFalse(
+                        "Should NOT rebuild when lazy_reconnection is enabled, connected, and only partial seed change",
+                        strategy.shouldRebuildConnection(partialSeedChange)
+                    );
+                }
+            }
+        }
+    }
+
+    public void testLazyReconnectionEnabled_RebuildOnAllSeedsChange() {
+        List<DiscoveryNode> knownNodes = new CopyOnWriteArrayList<>();
+        try (
+            MockTransportService seedTransport1 = startTransport("seed_node_1", knownNodes, Version.CURRENT);
+            MockTransportService seedTransport2 = startTransport("seed_node_2", knownNodes, Version.CURRENT);
+            MockTransportService seedTransport3 = startTransport("seed_node_3", knownNodes, Version.CURRENT);
+            MockTransportService seedTransport4 = startTransport("seed_node_4", knownNodes, Version.CURRENT)
+        ) {
+            DiscoveryNode seedNode1 = seedTransport1.getLocalNode();
+            DiscoveryNode seedNode2 = seedTransport2.getLocalNode();
+            DiscoveryNode seedNode3 = seedTransport3.getLocalNode();
+            DiscoveryNode seedNode4 = seedTransport4.getLocalNode();
+            knownNodes.add(seedNode1);
+            knownNodes.add(seedNode2);
+            knownNodes.add(seedNode3);
+            knownNodes.add(seedNode4);
+
+            try (
+                MockTransportService localService = MockTransportService.createNewService(
+                    Settings.EMPTY,
+                    Version.CURRENT,
+                    threadPool,
+                    NoopTracer.INSTANCE
+                )
+            ) {
+                localService.start();
+                localService.acceptIncomingRequests();
+
+                ClusterConnectionManager connectionManager = new ClusterConnectionManager(profile, localService.transport);
+                try (
+                    RemoteConnectionManager remoteConnectionManager = new RemoteConnectionManager(clusterAlias, connectionManager);
+                    SniffConnectionStrategy strategy = new SniffConnectionStrategy(
+                        clusterAlias,
+                        localService,
+                        remoteConnectionManager,
+                        null,
+                        Settings.EMPTY,
+                        3,
+                        n -> true,
+                        seedNodes(seedNode1, seedNode2),
+                        true // lazyReconnectionEnabled = true
+                    )
+                ) {
+                    PlainActionFuture<Void> connectFuture = PlainActionFuture.newFuture();
+                    strategy.connect(connectFuture);
+                    connectFuture.actionGet();
+
+                    assertTrue(connectionManager.nodeConnected(seedNode1));
+                    assertTrue(connectionManager.nodeConnected(seedNode2));
+                    assertTrue(strategy.assertNoRunningConnections());
+
+                    // Change ALL seeds - even with lazyReconnection enabled, should rebuild
+                    // because all seeds are different (might indicate a different cluster)
+                    Setting<?> seedSetting = SniffConnectionStrategy.REMOTE_CLUSTER_SEEDS.getConcreteSettingForNamespace(clusterAlias);
+                    Settings allSeedsChange = Settings.builder()
+                        .put(seedSetting.getKey(), Strings.arrayToCommaDelimitedString(seedNodes(seedNode3, seedNode4).toArray()))
+                        .build();
+
+                    // With lazy_reconnection enabled but ALL seeds changed, should still rebuild
+                    assertTrue(
+                        "Should rebuild when all seeds are replaced (even with lazy_reconnection enabled)",
+                        strategy.shouldRebuildConnection(allSeedsChange)
+                    );
+                }
+            }
+        }
+    }
+
+    public void testLazyReconnectionEnabled_RebuildWhenNotConnected() {
+        List<DiscoveryNode> knownNodes = new CopyOnWriteArrayList<>();
+        try (
+            MockTransportService seedTransport1 = startTransport("seed_node_1", knownNodes, Version.CURRENT);
+            MockTransportService seedTransport2 = startTransport("seed_node_2", knownNodes, Version.CURRENT);
+            MockTransportService seedTransport3 = startTransport("seed_node_3", knownNodes, Version.CURRENT)
+        ) {
+            DiscoveryNode seedNode1 = seedTransport1.getLocalNode();
+            DiscoveryNode seedNode2 = seedTransport2.getLocalNode();
+            DiscoveryNode seedNode3 = seedTransport3.getLocalNode();
+            knownNodes.add(seedNode1);
+            knownNodes.add(seedNode2);
+            knownNodes.add(seedNode3);
+
+            try (
+                MockTransportService localService = MockTransportService.createNewService(
+                    Settings.EMPTY,
+                    Version.CURRENT,
+                    threadPool,
+                    NoopTracer.INSTANCE
+                )
+            ) {
+                localService.start();
+                localService.acceptIncomingRequests();
+
+                ClusterConnectionManager connectionManager = new ClusterConnectionManager(profile, localService.transport);
+                try (
+                    RemoteConnectionManager remoteConnectionManager = new RemoteConnectionManager(clusterAlias, connectionManager);
+                    SniffConnectionStrategy strategy = new SniffConnectionStrategy(
+                        clusterAlias,
+                        localService,
+                        remoteConnectionManager,
+                        null,
+                        Settings.EMPTY,
+                        3,
+                        n -> true,
+                        seedNodes(seedNode1, seedNode2),
+                        true // lazyReconnectionEnabled = true
+                    )
+                ) {
+                    // Do NOT connect - strategy is not connected yet
+                    assertFalse(connectionManager.nodeConnected(seedNode1));
+                    assertFalse(connectionManager.nodeConnected(seedNode2));
+
+                    // Change one seed (partial change) - even with lazyReconnection enabled,
+                    // should rebuild because we're not connected yet
+                    Setting<?> seedSetting = SniffConnectionStrategy.REMOTE_CLUSTER_SEEDS.getConcreteSettingForNamespace(clusterAlias);
+                    Settings partialSeedChange = Settings.builder()
+                        .put(seedSetting.getKey(), Strings.arrayToCommaDelimitedString(seedNodes(seedNode1, seedNode3).toArray()))
+                        .build();
+
+                    // With lazy_reconnection enabled but NOT connected, should rebuild
+                    assertTrue(
+                        "Should rebuild when not connected (even with lazy_reconnection enabled)",
+                        strategy.shouldRebuildConnection(partialSeedChange)
+                    );
+                }
+            }
+        }
+    }
 }
