@@ -195,6 +195,188 @@ public class IngestFromKafkaIT extends KafkaIngestionBaseIT {
         });
     }
 
+    /**
+     * Test partial updates without versioning.
+     * 1. Send an index request to create document id=1
+     * 2. Send partial update to update age field for id=1
+     * 3. Send partial update to add city field for id=1
+     * 4. Send partial update for id=2 (upsert - creates new document)
+     * 5. Verify both documents have correct merged fields
+     */
+    public void testPartialUpdates() throws Exception {
+        // Step 1: Create initial document with name and age
+        produceData("1", "bob", "24", defaultMessageTimestamp, "index");
+
+        createIndex(
+            indexName,
+            Settings.builder()
+                .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+                .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
+                .put("ingestion_source.type", "kafka")
+                .put("ingestion_source.pointer.init.reset", "earliest")
+                .put("ingestion_source.param.topic", topicName)
+                .put("ingestion_source.param.bootstrap_servers", kafka.getBootstrapServers())
+                .put("ingestion_source.all_active", true)
+                .build(),
+            "{\"properties\":{\"name\":{\"type\": \"text\"},\"age\":{\"type\": \"integer\"},\"city\":{\"type\": \"keyword\"}}}}"
+        );
+        ensureGreen(indexName);
+
+        waitForState(() -> validateDocument("1", Map.of("name", "bob", "age", 24)));
+
+        // Step 2: Send partial update to change age from 24 to 30
+        producePartialUpdate("1", "{\"age\": 30}");
+        waitForState(() -> validateDocument("1", Map.of("name", "bob", "age", 30)));
+
+        // Step 3: Send partial update to add city field
+        producePartialUpdate("1", "{\"city\": \"NYC\"}");
+        waitForState(() -> validateDocument("1", Map.of("name", "bob", "age", 30, "city", "NYC")));
+
+        // Step 4: Send partial update for id=2 (upsert - creates new document since id=2 doesn't exist)
+        producePartialUpdate("2", "{\"name\": \"alice\", \"age\": 25, \"city\": \"SF\"}");
+        waitForState(() -> validateDocument("2", Map.of("name", "alice", "age", 25, "city", "SF")));
+
+        // Step 5: Verify both documents are correctly persisted
+        waitForState(() -> {
+            return validateDocument("1", Map.of("name", "bob", "age", 30, "city", "NYC"))
+                && validateDocument("2", Map.of("name", "alice", "age", 25, "city", "SF"));
+        });
+    }
+
+    /**
+     * Test partial updates with external versioning and shard relocation.
+     * 1. Send an index request with version 1
+     * 2. Send partial update with version 2
+     * 3. Send partial update with version 3
+     * 4. Relocate the shard to another node
+     * 5. Send partial update with version 4 and verify
+     */
+    public void testPartialUpdatesWithVersion() throws Exception {
+        // Start cluster with multiple nodes for shard relocation
+        internalCluster().startClusterManagerOnlyNode();
+        final String nodeA = internalCluster().startDataOnlyNode();
+
+        // Step 1: Create initial document with version 1
+        produceDataWithExternalVersion("1", 1, "alice", "21", defaultMessageTimestamp, "index");
+
+        createIndex(
+            indexName,
+            Settings.builder()
+                .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+                .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
+                .put("ingestion_source.type", "kafka")
+                .put("ingestion_source.pointer.init.reset", "earliest")
+                .put("ingestion_source.param.topic", topicName)
+                .put("ingestion_source.param.bootstrap_servers", kafka.getBootstrapServers())
+                .put("ingestion_source.all_active", true)
+                .build(),
+            "{\"properties\":{\"name\":{\"type\": \"text\"},\"age\":{\"type\": \"integer\"},\"city\":{\"type\": \"keyword\"},\"status\":{\"type\": \"keyword\"}}}}"
+        );
+        ensureGreen(indexName);
+
+        waitForState(() -> validateDocument("1", Map.of("name", "alice", "age", 21)));
+
+        // Step 2: Send partial update with version 2 to change age
+        producePartialUpdateWithVersion("1", 2, "{\"age\": 25}");
+        waitForState(() -> validateDocument("1", Map.of("name", "alice", "age", 25)));
+
+        // Step 3: Send partial update with version 3 to add city
+        producePartialUpdateWithVersion("1", 3, "{\"city\": \"SF\"}");
+        waitForState(() -> validateDocument("1", Map.of("name", "alice", "age", 25, "city", "SF")));
+
+        // Flush before shard relocation to persist data
+        flush(indexName);
+
+        // Step 4: Start second node and relocate shard
+        final String nodeB = internalCluster().startDataOnlyNode();
+        assertBusy(() -> {
+            assertEquals(
+                "Should have 3 nodes total (1 cluster manager + 2 data)",
+                3,
+                internalCluster().clusterService().state().nodes().getSize()
+            );
+        }, 30, TimeUnit.SECONDS);
+
+        // Move shard from nodeA to nodeB
+        client().admin().cluster().prepareReroute().add(new MoveAllocationCommand(indexName, 0, nodeA, nodeB)).get();
+        ensureGreen(indexName);
+
+        // Step 5: Send partial update with version 4 after shard relocation and verify
+        producePartialUpdateWithVersion("1", 4, "{\"age\": 30, \"status\": \"active\"}");
+        waitForState(() -> validateDocument("1", Map.of("name", "alice", "age", 30, "city", "SF", "status", "active")));
+    }
+
+    /**
+     * Test rapid sequential partial updates to verify refresh mechanism works correctly.
+     * This test sends 10 partial updates in quick succession, each building on the previous state.
+     * If refresh is not working correctly, intermediate updates would be lost because each
+     * partial update needs to read the current document state to merge with the new fields.
+     *
+     * The test only validates the final state, which should contain all accumulated updates:
+     * - Initial: name=test, counter=0
+     * - Update 1: counter=1, field1=value1
+     * - Update 2: counter=2, field2=value2
+     * - ...
+     * - Update 10: counter=10, field10=value10
+     *
+     * Final state should have: name=test, counter=10, field1-field10 all present
+     */
+    public void testRapidSequentialPartialUpdates() throws Exception {
+        // Create initial document with name and counter fields
+        String initialPayload = "{\"_id\":\"1\", \"_op_type\":\"index\",\"_source\":{\"name\":\"test\", \"counter\": 0}}";
+        produceData(initialPayload);
+
+        createIndex(
+            indexName,
+            Settings.builder()
+                .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+                .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
+                .put("ingestion_source.type", "kafka")
+                .put("ingestion_source.pointer.init.reset", "earliest")
+                .put("ingestion_source.param.topic", topicName)
+                .put("ingestion_source.param.bootstrap_servers", kafka.getBootstrapServers())
+                .put("ingestion_source.all_active", true)
+                .build(),
+            "{\"properties\":{"
+                + "\"name\":{\"type\": \"keyword\"},"
+                + "\"counter\":{\"type\": \"integer\"},"
+                + "\"field1\":{\"type\": \"keyword\"},"
+                + "\"field2\":{\"type\": \"keyword\"},"
+                + "\"field3\":{\"type\": \"keyword\"},"
+                + "\"field4\":{\"type\": \"keyword\"},"
+                + "\"field5\":{\"type\": \"keyword\"},"
+                + "\"field6\":{\"type\": \"keyword\"},"
+                + "\"field7\":{\"type\": \"keyword\"},"
+                + "\"field8\":{\"type\": \"keyword\"},"
+                + "\"field9\":{\"type\": \"keyword\"},"
+                + "\"field10\":{\"type\": \"keyword\"}"
+                + "}}"
+        );
+        ensureGreen(indexName);
+
+        // Wait for initial document to be indexed
+        waitForState(() -> validateDocument("1", Map.of("name", "test", "counter", 0)));
+
+        // Send 10 rapid partial updates - each one increments counter and adds a new field
+        // These are sent quickly without waiting for intermediate states
+        for (int i = 1; i <= 10; i++) {
+            String partialUpdate = String.format("{\"counter\": %d, \"field%d\": \"value%d\"}", i, i, i);
+            producePartialUpdate("1", partialUpdate);
+        }
+
+        // Only validate the final state - all 10 updates should have been applied correctly
+        // If refresh wasn't working, some intermediate states would be lost
+        waitForState(() -> {
+            Map<String, Object> expectedFinalState = new HashMap<>();
+            expectedFinalState.put("name", "test");
+            expectedFinalState.put("counter", 10);
+            for (int i = 1; i <= 10; i++) {
+                expectedFinalState.put("field" + i, "value" + i);
+            }
+            return validateDocument("1", expectedFinalState);
+        });
+    }
+
     public void testUpdateWithoutIDField() throws Exception {
         // Step 1: Produce message without ID
         String payload = "{\"_op_type\":\"index\",\"_source\":{\"name\":\"name\", \"age\": 25}}";

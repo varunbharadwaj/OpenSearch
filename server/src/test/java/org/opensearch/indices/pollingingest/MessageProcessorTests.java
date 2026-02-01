@@ -136,7 +136,63 @@ public class MessageProcessorTests extends OpenSearchTestCase {
         );
     }
 
-    public void testUnsupportedOperation() throws IOException {
+    public void testPartialUpdateOperationWithUpsert() throws IOException {
+        // Test partial update when document doesn't exist (upsert behavior)
+        byte[] payload = "{\"_id\":\"1\", \"_op_type\":\"update\", \"_source\":{\"name\":\"bob\", \"age\": 24}}".getBytes(StandardCharsets.UTF_8);
+        FakeIngestionSource.FakeIngestionShardPointer pointer = new FakeIngestionSource.FakeIngestionShardPointer(0);
+
+        ParsedDocument parsedDocument = mock(ParsedDocument.class);
+        when(documentMapper.parse(any())).thenReturn(parsedDocument);
+        when(parsedDocument.rootDoc()).thenReturn(new ParseContext.Document());
+        // Return null to simulate document not found
+        when(ingestionEngine.getSourceForPartialUpdate("1")).thenReturn(null);
+
+        MessageProcessorRunnable.MessageOperation operation = processor.getOperation(
+            new ShardUpdateMessage(pointer, mock(Message.class), IngestionUtils.getParsedPayloadMap(payload), 0),
+            MessageProcessorRunnable.MessageProcessorMetrics.create()
+        );
+
+        assertTrue(operation.engineOperation() instanceof Engine.Index);
+        assertEquals(DocWriteRequest.OpType.UPDATE, operation.opType());
+        ArgumentCaptor<SourceToParse> captor = ArgumentCaptor.forClass(SourceToParse.class);
+        verify(documentMapper).parse(captor.capture());
+        assertEquals("index", captor.getValue().index());
+        assertEquals("1", captor.getValue().id());
+    }
+
+    public void testPartialUpdateOperationWithMerge() throws IOException {
+        // Test partial update when document exists (merge behavior)
+        byte[] payload = "{\"_id\":\"1\", \"_op_type\":\"update\", \"_source\":{\"age\": 25}}".getBytes(StandardCharsets.UTF_8);
+        FakeIngestionSource.FakeIngestionShardPointer pointer = new FakeIngestionSource.FakeIngestionShardPointer(0);
+
+        ParsedDocument parsedDocument = mock(ParsedDocument.class);
+        when(documentMapper.parse(any())).thenReturn(parsedDocument);
+        when(parsedDocument.rootDoc()).thenReturn(new ParseContext.Document());
+        
+        // Return existing document source
+        String existingSource = "{\"name\":\"bob\", \"age\": 24}";
+        when(ingestionEngine.getSourceForPartialUpdate("1"))
+            .thenReturn(new org.opensearch.core.common.bytes.BytesArray(existingSource));
+
+        MessageProcessorRunnable.MessageOperation operation = processor.getOperation(
+            new ShardUpdateMessage(pointer, mock(Message.class), IngestionUtils.getParsedPayloadMap(payload), 0),
+            MessageProcessorRunnable.MessageProcessorMetrics.create()
+        );
+
+        assertTrue(operation.engineOperation() instanceof Engine.Index);
+        assertEquals(DocWriteRequest.OpType.UPDATE, operation.opType());
+        ArgumentCaptor<SourceToParse> captor = ArgumentCaptor.forClass(SourceToParse.class);
+        verify(documentMapper).parse(captor.capture());
+        assertEquals("index", captor.getValue().index());
+        assertEquals("1", captor.getValue().id());
+        // The source should contain both the existing name and the updated age
+        String mergedSource = captor.getValue().source().utf8ToString();
+        assertTrue(mergedSource.contains("\"name\":\"bob\"") || mergedSource.contains("\"name\": \"bob\""));
+        assertTrue(mergedSource.contains("\"age\":25") || mergedSource.contains("\"age\": 25"));
+    }
+
+    public void testPartialUpdateOperationMissingSource() throws IOException {
+        // Test partial update without source field
         byte[] payload = "{\"_id\":\"1\", \"_op_type\":\"update\"}".getBytes(StandardCharsets.UTF_8);
         FakeIngestionSource.FakeIngestionShardPointer pointer = new FakeIngestionSource.FakeIngestionShardPointer(0);
 

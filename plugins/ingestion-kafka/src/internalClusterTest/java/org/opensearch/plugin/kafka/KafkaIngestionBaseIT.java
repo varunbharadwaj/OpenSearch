@@ -32,6 +32,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -122,6 +123,35 @@ public class KafkaIngestionBaseIT extends OpenSearchIntegTestCase {
         producer.send(new ProducerRecord<>(topicName, null, timestamp, "null", payload));
     }
 
+    /**
+     * Produces a partial update message without version.
+     * The source contains only the fields to update.
+     */
+    protected void producePartialUpdate(String id, String partialSourceJson) {
+        String payload = String.format(
+            Locale.ROOT,
+            "{\"_id\":\"%s\", \"_op_type\":\"update\",\"_source\":%s}",
+            id,
+            partialSourceJson
+        );
+        producer.send(new ProducerRecord<>(topicName, null, defaultMessageTimestamp, "null", payload));
+    }
+
+    /**
+     * Produces a partial update message with external version.
+     * The source contains only the fields to update.
+     */
+    protected void producePartialUpdateWithVersion(String id, long version, String partialSourceJson) {
+        String payload = String.format(
+            Locale.ROOT,
+            "{\"_id\":\"%s\", \"_version\":\"%d\", \"_op_type\":\"update\",\"_source\":%s}",
+            id,
+            version,
+            partialSourceJson
+        );
+        producer.send(new ProducerRecord<>(topicName, null, defaultMessageTimestamp, "null", payload));
+    }
+
     protected void produceData(String payload) {
         producer.send(new ProducerRecord<>(topicName, null, defaultMessageTimestamp, "null", payload));
     }
@@ -149,6 +179,35 @@ public class KafkaIngestionBaseIT extends OpenSearchIntegTestCase {
                 fail("Provided state requirements not met");
             }
         }, 1, TimeUnit.MINUTES);
+    }
+
+    /**
+     * Validates that a document with the given id has the expected field values.
+     *
+     * @param id the document id
+     * @param expectedValues map of field names to expected values
+     * @return true if the document exists and all expected values match, false otherwise
+     */
+    protected boolean validateDocument(String id, Map<String, Object> expectedValues) {
+        try {
+            refresh(indexName);
+            SearchResponse response = client().prepareSearch(indexName)
+                .setQuery(new org.opensearch.index.query.TermQueryBuilder("_id", id))
+                .get();
+            if (response.getHits().getTotalHits().value() != 1L) {
+                return false;
+            }
+            Map<String, Object> source = response.getHits().getHits()[0].getSourceAsMap();
+            for (Map.Entry<String, Object> entry : expectedValues.entrySet()) {
+                Object actual = source.get(entry.getKey());
+                if (!entry.getValue().equals(actual)) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     protected String getSettings(String indexName, String setting) {
