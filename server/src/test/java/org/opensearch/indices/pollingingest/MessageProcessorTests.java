@@ -138,7 +138,9 @@ public class MessageProcessorTests extends OpenSearchTestCase {
 
     public void testPartialUpdateOperationWithUpsert() throws IOException {
         // Test partial update when document doesn't exist (upsert behavior)
-        byte[] payload = "{\"_id\":\"1\", \"_op_type\":\"update\", \"_source\":{\"name\":\"bob\", \"age\": 24}}".getBytes(StandardCharsets.UTF_8);
+        byte[] payload = "{\"_id\":\"1\", \"_op_type\":\"update\", \"_source\":{\"name\":\"bob\", \"age\": 24}}".getBytes(
+            StandardCharsets.UTF_8
+        );
         FakeIngestionSource.FakeIngestionShardPointer pointer = new FakeIngestionSource.FakeIngestionShardPointer(0);
 
         ParsedDocument parsedDocument = mock(ParsedDocument.class);
@@ -168,11 +170,10 @@ public class MessageProcessorTests extends OpenSearchTestCase {
         ParsedDocument parsedDocument = mock(ParsedDocument.class);
         when(documentMapper.parse(any())).thenReturn(parsedDocument);
         when(parsedDocument.rootDoc()).thenReturn(new ParseContext.Document());
-        
+
         // Return existing document source
         String existingSource = "{\"name\":\"bob\", \"age\": 24}";
-        when(ingestionEngine.getSourceForPartialUpdate("1"))
-            .thenReturn(new org.opensearch.core.common.bytes.BytesArray(existingSource));
+        when(ingestionEngine.getSourceForPartialUpdate("1")).thenReturn(new org.opensearch.core.common.bytes.BytesArray(existingSource));
 
         MessageProcessorRunnable.MessageOperation operation = processor.getOperation(
             new ShardUpdateMessage(pointer, mock(Message.class), IngestionUtils.getParsedPayloadMap(payload), 0),

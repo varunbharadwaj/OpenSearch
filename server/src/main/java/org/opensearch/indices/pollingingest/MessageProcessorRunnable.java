@@ -64,9 +64,16 @@ public class MessageProcessorRunnable implements Runnable, Closeable {
     private final MessageProcessor messageProcessor;
     private final MessageProcessorMetrics messageProcessorMetrics = MessageProcessorMetrics.create();
 
-    // currentShardPointer tracks the most recent pointer that is being processed
+    // currentShardPointer tracks the most recent pointer that is being processed (set before processing)
     @Nullable
     private volatile IngestionShardPointer currentShardPointer;
+
+    // lastSuccessfulPointer tracks the most recent pointer that was successfully processed (set after processing)
+    // This is used for partial update refresh optimization - unlike currentShardPointer, this is only updated
+    // after the message has been fully processed successfully.
+    @Nullable
+    private volatile IngestionShardPointer lastSuccessfulPointer;
+
     private volatile boolean closed = false;
     private volatile IngestionErrorStrategy errorStrategy;
 
@@ -368,10 +375,7 @@ public class MessageProcessorRunnable implements Runnable, Closeable {
             Map<String, Object> mergedSource;
             if (existingSourceBytes != null) {
                 // Document exists - merge partial update with existing source
-                Tuple<XContentType, Map<String, Object>> sourceAndContent = XContentHelper.convertToMap(
-                    existingSourceBytes,
-                    true
-                );
+                Tuple<XContentType, Map<String, Object>> sourceAndContent = XContentHelper.convertToMap(existingSourceBytes, true);
                 mergedSource = sourceAndContent.v2();
 
                 // Merge the partial update into the existing source
@@ -451,6 +455,9 @@ public class MessageProcessorRunnable implements Runnable, Closeable {
                     messageProcessorMetrics.processedCounter.inc();
                     currentShardPointer = shardUpdateMessage.pointer();
                     messageProcessor.process(shardUpdateMessage, messageProcessorMetrics);
+                    // Update lastSuccessfulPointer AFTER successful processing
+                    // This is critical for partial update refresh optimization
+                    lastSuccessfulPointer = shardUpdateMessage.pointer();
                     shardUpdateMessage = null;
                     retryCount = 0;
                 } catch (VersionConflictEngineException e) {
@@ -513,6 +520,16 @@ public class MessageProcessorRunnable implements Runnable, Closeable {
     @Nullable
     public IngestionShardPointer getCurrentShardPointer() {
         return currentShardPointer;
+    }
+
+    /**
+     * Returns the last successfully processed pointer. This is updated only after a message has been
+     * fully processed successfully, unlike currentShardPointer which is set before processing.
+     * Used for partial update refresh optimization.
+     */
+    @Nullable
+    public IngestionShardPointer getLastSuccessfulPointer() {
+        return lastSuccessfulPointer;
     }
 
     /**

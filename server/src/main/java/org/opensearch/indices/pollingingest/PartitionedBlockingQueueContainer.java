@@ -10,6 +10,7 @@ package org.opensearch.indices.pollingingest;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.common.Nullable;
 import org.opensearch.core.common.Strings;
 import org.opensearch.index.IngestionShardPointer;
 import org.opensearch.index.Message;
@@ -171,6 +172,38 @@ public class PartitionedBlockingQueueContainer {
      */
     public List<IngestionShardPointer> getCurrentShardPointers() {
         return partitionToMessageProcessorMap.values().stream().map(MessageProcessorRunnable::getCurrentShardPointer).toList();
+    }
+
+    /**
+     * Returns the last successfully processed pointers from each message processor thread.
+     * Unlike getCurrentShardPointers(), these are only updated after successful processing.
+     */
+    public List<IngestionShardPointer> getLastSuccessfulPointers() {
+        return partitionToMessageProcessorMap.values().stream().map(MessageProcessorRunnable::getLastSuccessfulPointer).toList();
+    }
+
+    /**
+     * Returns the minimum successfully processed pointer across all processor threads.
+     * This represents the "safe" point up to which all processors have successfully processed.
+     * Used for partial update refresh optimization.
+     *
+     * @return the minimum successful pointer, or null if no messages have been processed yet
+     */
+    @Nullable
+    public IngestionShardPointer getMinSuccessfulPointer() {
+        IngestionShardPointer minPointer = null;
+        for (MessageProcessorRunnable processor : partitionToMessageProcessorMap.values()) {
+            IngestionShardPointer pointer = processor.getLastSuccessfulPointer();
+            if (pointer == null) {
+                // If any processor hasn't processed anything yet, return null
+                // This ensures we don't make incorrect refresh decisions
+                return null;
+            }
+            if (minPointer == null || pointer.compareTo(minPointer) < 0) {
+                minPointer = pointer;
+            }
+        }
+        return minPointer;
     }
 
     private int getPartitionFromID(String id) {

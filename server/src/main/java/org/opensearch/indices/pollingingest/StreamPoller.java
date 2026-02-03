@@ -10,6 +10,7 @@ package org.opensearch.indices.pollingingest;
 
 import org.opensearch.cluster.ClusterStateListener;
 import org.opensearch.cluster.metadata.IngestionSource;
+import org.opensearch.common.Nullable;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.index.IngestionShardConsumer;
 import org.opensearch.index.IngestionShardPointer;
@@ -82,6 +83,17 @@ public interface StreamPoller extends Closeable, ClusterStateListener {
      * @param updatedIngestionSource the updated ingestion source with new configuration parameters
      */
     void requestConsumerReinitialization(IngestionSource updatedIngestionSource);
+
+    /**
+     * Returns the minimum successfully processed pointer across all processor threads.
+     * This represents the "safe" point up to which all processors have successfully completed processing.
+     * Used for partial update refresh optimization - if this pointer is greater than the last refreshed
+     * pointer, a refresh may be needed to see the latest data.
+     *
+     * @return the minimum successful pointer, or null if no messages have been processed yet
+     */
+    @Nullable
+    IngestionShardPointer getMinSuccessfulPointer();
 
     /**
      * A state to indicate the current state of the poller

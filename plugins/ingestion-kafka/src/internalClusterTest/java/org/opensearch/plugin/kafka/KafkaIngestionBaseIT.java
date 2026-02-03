@@ -128,12 +128,7 @@ public class KafkaIngestionBaseIT extends OpenSearchIntegTestCase {
      * The source contains only the fields to update.
      */
     protected void producePartialUpdate(String id, String partialSourceJson) {
-        String payload = String.format(
-            Locale.ROOT,
-            "{\"_id\":\"%s\", \"_op_type\":\"update\",\"_source\":%s}",
-            id,
-            partialSourceJson
-        );
+        String payload = String.format(Locale.ROOT, "{\"_id\":\"%s\", \"_op_type\":\"update\",\"_source\":%s}", id, partialSourceJson);
         producer.send(new ProducerRecord<>(topicName, null, defaultMessageTimestamp, "null", payload));
     }
 

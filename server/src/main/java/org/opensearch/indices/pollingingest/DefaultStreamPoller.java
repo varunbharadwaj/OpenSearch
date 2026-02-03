@@ -460,6 +460,12 @@ public class DefaultStreamPoller implements StreamPoller {
         return consumer;
     }
 
+    @Nullable
+    @Override
+    public IngestionShardPointer getMinSuccessfulPointer() {
+        return blockingQueueContainer.getMinSuccessfulPointer();
+    }
+
     /**
      * Mark the poller's consumer for reinitialization. A new consumer will be initialized and start consuming from the
      * latest batchStartPointer. This method also reinitializes the consumer factory with the updated ingestion source.
