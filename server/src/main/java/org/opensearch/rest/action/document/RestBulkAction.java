@@ -32,11 +32,14 @@
 
 package org.opensearch.rest.action.document;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.action.DocWriteRequest;
 import org.opensearch.action.bulk.BulkRequest;
 import org.opensearch.action.bulk.BulkShardRequest;
 import org.opensearch.action.support.ActiveShardCount;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.core.common.bytes.BytesReference;
 import org.opensearch.rest.BaseRestHandler;
 import org.opensearch.rest.RestRequest;
 import org.opensearch.rest.action.RestStatusToXContentListener;
@@ -45,6 +48,7 @@ import org.opensearch.transport.client.Requests;
 import org.opensearch.transport.client.node.NodeClient;
 
 import java.io.IOException;
+import java.util.Base64;
 import java.util.List;
 
 import static java.util.Arrays.asList;
@@ -65,10 +69,51 @@ import static org.opensearch.rest.RestRequest.Method.PUT;
  */
 public class RestBulkAction extends BaseRestHandler {
 
+    private static final Logger logger = LogManager.getLogger(RestBulkAction.class);
+
     private final boolean allowExplicitIndex;
 
     public RestBulkAction(Settings settings) {
         this.allowExplicitIndex = MULTI_ALLOW_EXPLICIT_INDEX.get(settings);
+    }
+
+    /**
+     * Validates bulk payload structure. Returns true if corruption is detected.
+     * A valid bulk request alternates: action line, document line, action line, document line...
+     * Document lines should NOT start with action metadata like {"create", {"index", {"delete", {"update"
+     */
+    private static boolean detectBulkPayloadCorruption(BytesReference content) {
+        try {
+            String body = content.utf8ToString();
+            String[] lines = body.split("\n");
+            
+            // Check document lines (odd indices: 1, 3, 5, ...) for action metadata
+            // These should be document content, not action lines
+            for (int i = 1; i < lines.length; i += 2) {
+                String line = lines[i].trim();
+                if (line.isEmpty()) continue;
+                
+                // Document content should not start with bulk action metadata
+                if (line.startsWith("{\"create\"") || 
+                    line.startsWith("{\"index\"") || 
+                    line.startsWith("{\"delete\"") || 
+                    line.startsWith("{\"update\"")) {
+                    logger.error(
+                        "BULK_PAYLOAD_CORRUPTION detected at REST layer! " +
+                        "Document line {} starts with action metadata. Line content: [{}], " +
+                        "Full payload (base64): {}",
+                        i, 
+                        line.substring(0, Math.min(200, line.length())),
+                        Base64.getEncoder().encodeToString(BytesReference.toBytes(content))
+                    );
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            // If we can't parse, log but don't block
+            logger.warn("Failed to validate bulk payload: {}", e.getMessage());
+        }
+        return false;
     }
 
     @Override
@@ -97,8 +142,14 @@ public class RestBulkAction extends BaseRestHandler {
         Boolean defaultRequireAlias = request.paramAsBoolean(DocWriteRequest.REQUIRE_ALIAS, null);
         bulkRequest.timeout(request.paramAsTime("timeout", BulkShardRequest.DEFAULT_TIMEOUT));
         bulkRequest.setRefreshPolicy(request.param("refresh"));
+        
+        BytesReference content = request.requiredContent();
+        
+        // DEBUG: Check for corruption at REST entry point
+        detectBulkPayloadCorruption(content);
+        
         bulkRequest.add(
-            request.requiredContent(),
+            content,
             defaultIndex,
             defaultRouting,
             defaultFetchSourceContext,
